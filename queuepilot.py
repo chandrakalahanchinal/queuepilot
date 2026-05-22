@@ -266,10 +266,18 @@ def analyze_pr(repo: str, pr_number: int) -> dict:
             result["editions"][edition] = {"status": "not_run", "failures": [], "report_url": None}
             continue
 
-        conclusion   = cr.get("conclusion", "unknown")
+        conclusion   = cr.get("conclusion")
+        cr_status    = cr.get("status", "")
         summary      = cr.get("output", {}).get("summary", "")
         report_url   = extract_allure_url(summary, edition)
         jenkins_url  = cr.get("details_url", "")
+
+        if cr_status in ("in_progress", "queued") and conclusion is None:
+            result["editions"][edition] = {"status": "in_progress", "failures": [], "report_url": report_url, "jenkins_url": jenkins_url}
+            continue
+
+        if conclusion is None:
+            conclusion = "unknown"
 
         if conclusion != "failure":
             result["editions"][edition] = {"status": conclusion, "failures": [], "report_url": report_url, "jenkins_url": jenkins_url}
@@ -309,12 +317,13 @@ def analyze_pr(repo: str, pr_number: int) -> dict:
 # HTML dashboard
 # ──────────────────────────────────────────────────────────────────────────────
 STATUS_BADGE = {
-    "failure":  '<span class="badge fail">FAIL</span>',
-    "success":  '<span class="badge pass">PASS</span>',
-    "skipped":  '<span class="badge skip">SKIP</span>',
-    "neutral":  '<span class="badge neutral">NEUTRAL</span>',
-    "not_run":  '<span class="badge neutral">N/A</span>',
-    "unknown":  '<span class="badge neutral">?</span>',
+    "failure":     '<span class="badge fail">FAIL</span>',
+    "success":     '<span class="badge pass">PASS</span>',
+    "skipped":     '<span class="badge skip">SKIP</span>',
+    "neutral":     '<span class="badge neutral">NEUTRAL</span>',
+    "not_run":     '<span class="badge neutral">N/A</span>',
+    "unknown":     '<span class="badge neutral">?</span>',
+    "in_progress": '<span class="badge running">RUNNING</span>',
 }
 
 
@@ -375,7 +384,12 @@ def render_pr_card(pr: dict) -> str:
         label = edition.upper()
         table = render_failures_table(ed["failures"], ed.get("report_url"))
         fail_badge = failure_count_badge(ed)
-        if ed["status"] == "failure" and not ed["failures"]:
+        if ed["status"] == "in_progress":
+            jenkins_link = ""
+            if ed.get("jenkins_url"):
+                jenkins_link = f' <a href="{html.escape(ed["jenkins_url"])}" target="_blank">Jenkins ↗</a>'
+            no_data = f'<p class="muted">⏳ Checks are currently running.{jenkins_link}</p>'
+        elif ed["status"] == "failure" and not ed["failures"]:
             links = ""
             if ed.get("report_url"):
                 links += f' <a href="{html.escape(ed["report_url"])}" target="_blank">Allure ↗</a>'
@@ -494,6 +508,7 @@ def render_html(branch: str, prs: list[dict], generated_at: str) -> str:
     .badge.neutral{{ background: #3d444d; color: #c9d1d9; }}
     .badge.failed {{ background: #da3633; color: #fff; }}
     .badge.broken {{ background: #9e6a03; color: #fff; }}
+    .badge.running{{ background: #1158c7; color: #fff; }}
 
     /* Summary table */
     .summary-section h2 {{ font-size: 1.1rem; color: #f0f6fc; margin-bottom: 12px; }}
