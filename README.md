@@ -1,4 +1,4 @@
-# 🐛 Flakebuster
+# 🐛 QueuePilot
 
 Evidence-based triage of Magento functional test failures (CE / EE / B2B / SVC) for PRs in the `2.4-develop` queue.
 
@@ -30,8 +30,8 @@ Inspired by [flakebuster-agent](https://github.com/OneAdobe/flakebuster-agent).
 ## Setup
 
 ```bash
-git clone https://github.com/chandrakalahanchinal/flakebuster.git
-cd flakebuster
+git clone https://github.com/chandrakalahanchinal/queuepilot.git
+cd queuepilot
 pip install -r requirements.txt
 ```
 
@@ -43,14 +43,14 @@ pip install -r requirements.txt
 
 ```bash
 export SLACK_TOKEN=xoxb-your-token-here
-python3 flakebuster.py 2.4-develop
+python3 queuepilot.py 2.4-develop
 ```
 
 The script will:
 - Post `@qmbot dq 2.4-develop` to `#pr-queue-dashboard`
 - Wait for the bot to reply with the PR list
 - Analyze all PRs
-- Save `flakebuster-report.html` → open it in your browser
+- Save `queuepilot-report.html` → open it in your browser
 
 ### Read-only mode (message already sent manually)
 
@@ -58,13 +58,13 @@ If you sent `@qmbot dq 2.4-develop` yourself in Slack:
 
 ```bash
 export SLACK_TOKEN=xoxb-your-token-here
-python3 flakebuster.py 2.4-develop --read-only
+python3 queuepilot.py 2.4-develop --read-only
 ```
 
 ### Skip Slack — pass PR numbers directly
 
 ```bash
-python3 flakebuster.py 2.4-develop --prs 10717 10620 10727 10730
+python3 queuepilot.py 2.4-develop --prs 10717 10620 10727 10730
 ```
 
 No token needed. Goes straight to analysis.
@@ -74,7 +74,7 @@ No token needed. Goes straight to analysis.
 ## All options
 
 ```
-python3 flakebuster.py <branch> [options]
+python3 queuepilot.py <branch> [options]
 
 positional:
   branch              Queue branch name, e.g. 2.4-develop
@@ -84,7 +84,7 @@ options:
   --bot ID            Slack bot user ID       (default: qmbot)
   --cmd CMD           Bot command             (default: dq)
   --repo OWNER/REPO   GitHub repo             (default: magento-commerce/magento2ce)
-  --output FILE       Output HTML path        (default: flakebuster-report.html)
+  --output FILE       Output HTML path        (default: queuepilot-report.html)
   --read-only         Read latest qmbot response, don't post
   --prs N [N ...]     Skip Slack, use these PR numbers directly
 ```
@@ -113,7 +113,7 @@ For private channels, invite both bots before running:
 
 ## Output
 
-The tool generates `flakebuster-report.html` — a dark-themed dashboard with:
+The tool generates `queuepilot-report.html` — a dark-themed dashboard with:
 
 - **Summary table** — all PRs at a glance with CE / EE / B2B / SVC badges
 - **Per-PR cards** — full list of failing test method names per suite
@@ -121,5 +121,5 @@ The tool generates `flakebuster-report.html` — a dark-themed dashboard with:
 - **Direct links** — Allure reports and Jenkins jobs for each check
 
 ```
-open flakebuster-report.html
+open queuepilot-report.html
 ```
