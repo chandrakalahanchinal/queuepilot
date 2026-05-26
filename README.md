@@ -1,4 +1,4 @@
-# 🐛 QueuePilot
+# QueuePilot
 
 Evidence-based triage of Magento functional test failures (CE / EE / B2B / SVC) for PRs in the `2.4-develop` queue.
 
@@ -6,17 +6,21 @@ Inspired by [flakebuster-agent](https://github.com/OneAdobe/flakebuster-agent).
 
 ---
 
-## Team Setup (start here)
+## Team Setup
+
+Follow these steps once on each machine where you want to use QueuePilot.
 
 ### 1. Prerequisites
 
-| Tool | Install | Check |
-|------|---------|-------|
+Install these tools before proceeding:
+
+| Tool | Install | Verify |
+|------|---------|--------|
 | Python 3.10+ | [python.org](https://www.python.org/downloads/) | `python3 --version` |
 | GitHub CLI | `brew install gh` | `gh --version` |
 | Claude Code | [claude.ai/code](https://claude.ai/code) | `claude --version` |
 
-### 2. Clone and install
+### 2. Clone the repo
 
 ```bash
 git clone https://github.com/chandrakalahanchinal/queuepilot.git
@@ -26,54 +30,98 @@ pip install -r requirements.txt
 
 ### 3. Authenticate GitHub CLI
 
+QueuePilot uses `gh` to fetch PR check-run results from GitHub.
+
 ```bash
 gh auth login
-# choose: GitHub.com → HTTPS → authenticate via browser
+# Select: GitHub.com → HTTPS → Login with a web browser
 ```
 
-Verify: `gh api user --jq .login` should print your username.
+Verify it works:
 
-### 4. Set up the Claude Code slash command
+```bash
+gh api user --jq .login
+# Should print your GitHub username
+```
 
-Copy the slash command file into your Claude commands folder:
+### 4. Set up the slash command
+
+Copy the slash command file to your Claude user commands folder:
 
 ```bash
 # macOS / Linux
+mkdir -p ~/.claude/commands
 cp .claude/commands/queuepilot.md ~/.claude/commands/queuepilot.md
 ```
 
-Then open the copied file and replace `REPO_PATH` with your actual clone path:
+Open the copied file and replace `REPO_PATH` with the absolute path to where you cloned the repo. Find your path with:
 
 ```bash
-# find your clone path
 pwd   # run this inside the queuepilot directory
 ```
 
-Edit `~/.claude/commands/queuepilot.md` — replace the placeholder path with your own:
+Then edit `~/.claude/commands/queuepilot.md` — find the line that reads:
 
 ```
-python3 /your/path/to/queuepilot/queuepilot.py ...
+python3 REPO_PATH/queuepilot.py $ARGUMENTS --prs <pr1> <pr2> ...
+```
+
+Replace `REPO_PATH` with your actual path, for example:
+
+```
+python3 /Users/yourname/queuepilot/queuepilot.py $ARGUMENTS --prs <pr1> <pr2> ...
 ```
 
 ### 5. Connect Slack in Claude Code
 
-Make sure you have the **Slack MCP** connected in Claude Code (Settings → Integrations → Slack). No `SLACK_TOKEN` env var needed — Claude uses its own Slack integration.
+QueuePilot posts to Slack and reads the PR list through Claude Code's Slack integration — no `SLACK_TOKEN` env var needed.
 
-If the `#pr-queue-dashboard` channel is private, invite the bots once:
+1. Open Claude Code → **Settings** → **Integrations** → connect **Slack**
+2. If the `#pr-queue-dashboard` channel is private, invite the bots once from inside that channel:
+   ```
+   /invite @slack_connector
+   /invite @qmbot
+   ```
+
+### 6. Allow Bash commands without prompts (recommended)
+
+Create a local settings file inside the repo to pre-approve the shell commands QueuePilot needs:
+
+```bash
+mkdir -p .claude
+cat > .claude/settings.local.json << 'EOF'
+{
+  "permissions": {
+    "allow": [
+      "mcp__claude_ai_Slack__slack_send_message",
+      "mcp__claude_ai_Slack__slack_read_channel",
+      "Bash"
+    ]
+  }
+}
+EOF
 ```
-/invite @slack_connector
-/invite @qmbot
+
+This file is gitignored and only affects your local session.
+
+### 7. Run it
+
+Open Claude Code from inside the `queuepilot` directory:
+
+```bash
+cd /path/to/queuepilot
+claude
 ```
 
-### 6. Run it
-
-Open Claude Code in the `queuepilot` directory and type:
+Then type:
 
 ```
 /queuepilot 2.4-develop
 ```
 
-Reports are saved to `queuepilot/reports/` inside the repo as `queuepilot-2.4-develop-YYYY-MM-DD-N.html`.
+Claude will post to Slack, fetch all PR failures, generate an HTML dashboard, open it in your browser, and print a per-PR summary in chat.
+
+Reports are saved to `reports/` as `queuepilot-2.4-develop-YYYY-MM-DD-N.html`.
 
 ---
 
@@ -84,7 +132,7 @@ Reports are saved to `queuepilot/reports/` inside the repo as `queuepilot-2.4-de
 3. Extracts failing test names from Allure reports (CE / EE / B2B)
 4. Checks Semantic Version Checker status
 5. Generates a self-contained **HTML dashboard** and opens it in your browser
-6. Prints a per-PR failure summary directly in the Claude Code chat
+6. Prints a per-PR failure summary directly in Claude Code chat
 
 ---
 
@@ -121,8 +169,8 @@ positional:
   branch              Queue branch name, e.g. 2.4-develop
 
 options:
-  --channel ID        Slack channel ID        (default: #pr-queue-dashboard)
-  --bot ID            Slack bot user ID       (default: qmbot)
+  --channel ID        Slack channel ID        (default: C0B400Y1ZU2 = #pr-queue-dashboard)
+  --bot ID            Slack bot user ID       (default: W015DAXESG0 = qmbot)
   --cmd CMD           Bot command             (default: dq)
   --repo OWNER/REPO   GitHub repo             (default: magento-commerce/magento2ce)
   --output FILE       Output HTML path        (default: reports/queuepilot-{branch}-{date}-{n}.html)
@@ -143,7 +191,7 @@ options:
 
 ## Output
 
-Reports are saved to `reports/` inside the repo directory with sequential daily filenames:
+Reports are saved to `reports/` inside the repo with sequential daily filenames:
 
 ```
 reports/
