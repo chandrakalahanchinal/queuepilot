@@ -33,7 +33,7 @@ DEFAULT_CHANNEL    = "C0B400Y1ZU2"  # #pr-queue-dashboard
 DEFAULT_BOT_ID     = "W015DAXESG0"  # qmbot
 DEFAULT_BOT_CMD    = "dq"
 DEFAULT_REPO       = "magento-commerce/magento2ce"
-DEFAULT_OUTPUT     = "queuepilot-report.html"
+DEFAULT_OUTPUT_DIR = "/Users/chandb/queuepilot"
 BOT_WAIT_TIMEOUT   = 90   # seconds to wait for bot reply
 ALLURE_WORKER_MAX  = 10   # parallel workers per PR for test-case fetches
 PR_WORKER_MAX      = 4    # parallel PR analyses
@@ -175,20 +175,41 @@ def _collect_failed(node: dict | list, results: list) -> None:
         _collect_failed(child, results)
 
 
-def get_failed_uids(base_url: str) -> list[dict]:
-    data = fetch_json(f"{base_url}/data/categories.json")
-    if not data:
-        return []
-    results = []
-    _collect_failed(data, results)
-    # Deduplicate by uid
-    seen = set()
-    unique = []
+def _dedup_uids(results: list[dict]) -> list[dict]:
+    seen, unique = set(), []
     for r in results:
         if r["uid"] not in seen:
             seen.add(r["uid"])
             unique.append(r)
     return unique
+
+
+def get_failed_uids(base_url: str) -> list[dict]:
+    """Try categories.json first, fall back to suites.json."""
+    for endpoint in ("data/categories.json", "data/suites.json"):
+        data = fetch_json(f"{base_url}/{endpoint}")
+        if not data:
+            continue
+        results = []
+        _collect_failed(data, results)
+        unique = _dedup_uids(results)
+        if unique:
+            return unique
+    return []
+
+
+def find_allure_url_from_jenkins(jenkins_url: str, edition: str) -> Optional[str]:
+    """Scrape the Jenkins build page for a public Allure report URL."""
+    try:
+        r = requests.get(jenkins_url, timeout=15, allow_redirects=False)
+        if r.status_code not in (200,):
+            return None
+        # Look for the public Allure storage URL pattern in the page HTML
+        pattern = rf"https://[^\s\"'<>]+allure-report-{edition}/index\.html"
+        m = re.search(pattern, r.text)
+        return m.group(0) if m else None
+    except Exception:
+        return None
 
 
 def get_test_method_name(base_url: str, uid: str) -> str:
@@ -286,12 +307,25 @@ def analyze_pr(repo: str, pr_number: int) -> dict:
         print(f"  [PR #{pr_number}] Fetching {edition.upper()} Allure failures...", flush=True)
         failures = []
         prom_stats = None
+
+        # If no Allure URL in check summary, try scraping it from the Jenkins build page
+        if not report_url and jenkins_url:
+            print(f"  [PR #{pr_number}] No Allure URL found — checking Jenkins build page for {edition.upper()}...", flush=True)
+            report_url = find_allure_url_from_jenkins(jenkins_url, edition)
+
         if report_url:
             base = allure_base(report_url)
-            uids = get_failed_uids(base)
-            failures = resolve_failures(base, uids)
-            if not failures:
+            # Retry up to 5 times — report may still be uploading or server may be busy
+            for attempt in range(5):
+                uids = get_failed_uids(base)
+                failures = resolve_failures(base, uids)
+                if failures:
+                    break
                 prom_stats = get_prometheus_stats(base)
+                if prom_stats:
+                    break
+                if attempt < 4:
+                    time.sleep(5)
 
         result["editions"][edition] = {
             "status":      "failure",
@@ -343,19 +377,12 @@ def render_failures_table(failures: list[dict], report_url: Optional[str]) -> st
         return ""
     rows = ""
     for f in failures:
-        label = html.escape(f["label"])
         method = html.escape(f["method"])
         status_cls = "broken" if f["status"] == "broken" else "failed"
-        rows += f"""
-        <tr>
-          <td><code class="{status_cls}">{method}</code></td>
-          <td class="muted">{label}</td>
-          <td><span class="badge {status_cls}">{f['status'].upper()}</span></td>
-        </tr>"""
+        rows += f'<tr><td><code class="{status_cls}">{method}</code></td></tr>'
     report_link = f'<a href="{html.escape(report_url)}" target="_blank">Open Allure Report ↗</a>' if report_url else ""
     return f"""
     <table class="failures">
-      <thead><tr><th>Test Method</th><th>Ticket / Name</th><th>Status</th></tr></thead>
       <tbody>{rows}</tbody>
     </table>
     {report_link}"""
@@ -384,7 +411,9 @@ def render_pr_card(pr: dict) -> str:
         label = edition.upper()
         table = render_failures_table(ed["failures"], ed.get("report_url"))
         fail_badge = failure_count_badge(ed)
-        if ed["status"] == "in_progress":
+        if ed["status"] == "not_run":
+            no_data = '<p class="muted">ℹ️ Checks not available.</p>'
+        elif ed["status"] == "in_progress":
             jenkins_link = ""
             if ed.get("jenkins_url"):
                 jenkins_link = f' <a href="{html.escape(ed["jenkins_url"])}" target="_blank">Jenkins ↗</a>'
@@ -410,6 +439,8 @@ def render_pr_card(pr: dict) -> str:
                     f'<span class="badge skip">{skipped_c} skipped</span>'
                     f'<br>{links}</p>'
                 )
+            elif ed.get("report_url"):
+                no_data = f'<p class="muted warn">⚠ Test data fetch failed — report exists but could not be read. Check Allure directly.{links}</p>'
             else:
                 no_data = f'<p class="muted warn">⚠ Build failed before tests ran — no report data.{links}</p>'
         else:
@@ -489,7 +520,7 @@ def render_html(branch: str, prs: list[dict], generated_at: str) -> str:
              background: #161b22; padding: 2px 6px; border-radius: 4px; }}
 
     /* Layout */
-    .container {{ max-width: 1200px; margin: 0 auto; padding: 24px 16px; }}
+    .container {{ max-width: 98vw; margin: 0 auto; padding: 24px 32px; }}
     header {{ border-bottom: 1px solid #21262d; padding-bottom: 20px; margin-bottom: 28px; }}
     header h1 {{ font-size: 1.6rem; color: #f0f6fc; }}
     header .meta {{ margin-top: 6px; color: #8b949e; font-size: 0.85rem; }}
@@ -529,20 +560,20 @@ def render_html(branch: str, prs: list[dict], generated_at: str) -> str:
     .pr-num {{ font-size: 1.1rem; font-weight: 700; color: #f0f6fc; }}
     .pr-title {{ flex: 1; font-weight: 600; color: #f0f6fc; }}
     .pr-meta {{ font-size: 0.8rem; color: #8b949e; white-space: nowrap; }}
-    .editions {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-                  gap: 1px; background: #21262d; }}
-    .edition-block {{ background: #161b22; padding: 16px 20px; }}
+    .editions {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: #21262d; }}
+    .edition-block {{ background: #161b22; padding: 14px 24px; }}
     .edition-block h4 {{ font-size: 0.85rem; color: #8b949e; text-transform: uppercase;
-                          letter-spacing: 0.05em; margin-bottom: 10px; display: flex;
+                          letter-spacing: 0.05em; margin-bottom: 8px; display: flex;
                           align-items: center; gap: 8px; }}
-    .failures {{ margin-top: 4px; font-size: 0.8rem; }}
-    .failures th {{ font-size: 0.7rem; }}
-    .failures td {{ padding: 5px 8px; }}
-    .failures a {{ display: block; margin-top: 8px; font-size: 0.8rem; }}
+    .failures {{ margin-top: 4px; width: 100%; table-layout: fixed; }}
+    .failures td {{ padding: 4px 0; width: 100%; }}
+    .failures a {{ display: inline-block; margin-top: 8px; font-size: 0.8rem; }}
     .muted {{ color: #8b949e; font-size: 0.8rem; }}
     .muted.warn {{ color: #e3b341; }}
-    code.failed {{ color: #ff7b72; background: transparent; padding: 0; }}
-    code.broken {{ color: #e3b341; background: transparent; padding: 0; }}
+    code.failed {{ color: #ff7b72; background: transparent; padding: 0; font-size: 0.9rem;
+                   white-space: normal; word-break: break-word; display: block; width: 100%; }}
+    code.broken {{ color: #e3b341; background: transparent; padding: 0; font-size: 0.9rem;
+                   white-space: normal; word-break: break-word; display: block; width: 100%; }}
 
     /* SVC block */
     .svc-block {{ padding: 10px 20px; font-size: 0.85rem; border-bottom: 1px solid #21262d;
@@ -596,7 +627,7 @@ def main():
                         help="Bot command to send (default: dq)")
     parser.add_argument("--repo",     default=os.getenv("GITHUB_REPO", DEFAULT_REPO),
                         help="GitHub repo slug")
-    parser.add_argument("--output",   default=DEFAULT_OUTPUT, help="Output HTML file path")
+    parser.add_argument("--output",   default=None, help="Output HTML file path (default: timestamped file in project dir)")
     parser.add_argument("--no-slack", action="store_true",
                         help="Skip Slack; pass PR numbers directly via --prs")
     parser.add_argument("--prs",      nargs="+", type=int,
@@ -676,10 +707,26 @@ def main():
     pr_results.sort(key=lambda x: pr_numbers.index(x["pr_number"]))
 
     # ── Step 3: Generate HTML ──────────────────────────────────────────────────
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now()
+    generated_at = now.strftime("%Y-%m-%d %H:%M:%S")
     html_content = render_html(args.branch, pr_results, generated_at)
 
-    output_path = os.path.abspath(args.output)
+    if args.output:
+        output_path = os.path.abspath(args.output)
+    else:
+        date_str = now.strftime("%Y-%m-%d")
+        branch_slug = args.branch.replace("/", "-")
+        # Find next available sequence number for today
+        n = 1
+        while True:
+            filename = f"queuepilot-{branch_slug}-{date_str}-{n}.html"
+            candidate = os.path.join(DEFAULT_OUTPUT_DIR, filename)
+            if not os.path.exists(candidate):
+                break
+            n += 1
+        output_path = os.path.join(DEFAULT_OUTPUT_DIR, filename)
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html_content)
 
