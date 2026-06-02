@@ -467,6 +467,31 @@ def render_pr_card(pr: dict) -> str:
   </div>"""
 
 
+def render_all_failures_table(prs: list[dict]) -> str:
+    from collections import Counter
+    counts: Counter = Counter()
+    for pr in prs:
+        for edition in ["ce", "ee", "b2b"]:
+            for f in pr["editions"].get(edition, {}).get("failures", []):
+                counts[f["method"]] += 1
+    if not counts:
+        return '<p class="muted">No test failures recorded.</p>'
+    rows = ""
+    for method, count in counts.most_common():
+        rows += f"""
+      <tr>
+        <td><code class="failed">{html.escape(method)}</code></td>
+        <td style="text-align:center;white-space:nowrap"><span class="badge fail">{count}</span></td>
+      </tr>"""
+    return f"""
+  <table class="summary">
+    <thead>
+      <tr><th>Test</th><th style="width:80px;text-align:center">Fail Count</th></tr>
+    </thead>
+    <tbody>{rows}</tbody>
+  </table>"""
+
+
 def render_summary_table(prs: list[dict]) -> str:
     rows = ""
     for pr in prs:
@@ -496,8 +521,9 @@ def render_summary_table(prs: list[dict]) -> str:
 
 
 def render_html(branch: str, prs: list[dict], generated_at: str) -> str:
-    summary_table = render_summary_table(prs)
-    pr_cards      = "\n".join(render_pr_card(pr) for pr in prs)
+    summary_table    = render_summary_table(prs)
+    all_fails_table  = render_all_failures_table(prs)
+    pr_cards         = "\n".join(render_pr_card(pr) for pr in prs)
     total_prs     = len(prs)
     total_fails   = sum(
         len(pr["editions"].get(ed, {}).get("failures", []))
@@ -600,6 +626,11 @@ def render_html(branch: str, prs: list[dict], generated_at: str) -> str:
     <div class="summary-section">
       <h2>Queue Summary</h2>
       {summary_table}
+    </div>
+
+    <div class="summary-section" style="margin-top:28px">
+      <h2>All Failing Tests</h2>
+      {all_fails_table}
     </div>
 
     <div class="pr-section">
