@@ -761,7 +761,13 @@ def main():
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html_content)
 
-    print(f"\n✅ Done! Report saved to:\n   {output_path}\n")
+    # Also copy to ~/Downloads
+    downloads_path = os.path.join(os.path.expanduser("~/Downloads"), os.path.basename(output_path))
+    import shutil
+    shutil.copy2(output_path, downloads_path)
+
+    print(f"\n✅ Done! Report saved to:\n   {output_path}")
+    print(f"   ~/Downloads/{os.path.basename(output_path)}\n")
     print(f"   Open with: open {output_path}\n")
 
 
