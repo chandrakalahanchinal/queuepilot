@@ -37,6 +37,8 @@ DEFAULT_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "r
 BOT_WAIT_TIMEOUT   = 90   # seconds to wait for bot reply
 ALLURE_WORKER_MAX  = 10   # parallel workers per PR for test-case fetches
 PR_WORKER_MAX      = 5    # parallel PR analyses
+JIRA_BASE          = "https://jira.corp.adobe.com"
+JIRA_PROJECT       = "ACQE"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -261,6 +263,66 @@ def resolve_failures(base_url: str, failed_uids: list[dict]) -> list[dict]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Jira
+# ──────────────────────────────────────────────────────────────────────────────
+def search_jira_for_test(method: str, token: str) -> Optional[dict]:
+    """Search ACQE project for a ticket whose title contains the test method name."""
+    try:
+        jql = f'project = {JIRA_PROJECT} AND summary ~ "{method}" ORDER BY created DESC'
+        r = requests.get(
+            f"{JIRA_BASE}/rest/api/2/search",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"jql": jql, "fields": "summary,status", "maxResults": 10},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            return None
+        issues = r.json().get("issues", [])
+        if not issues:
+            return None
+        # Prefer tickets that are not Done or Cancelled
+        active = [i for i in issues if i["fields"]["status"]["name"] not in ("Done", "Cancelled")]
+        pick = active[0] if active else issues[0]
+        return {
+            "key":    pick["key"],
+            "status": pick["fields"]["status"]["name"],
+            "url":    f"{JIRA_BASE}/browse/{pick['key']}",
+        }
+    except Exception:
+        return None
+
+
+def fetch_jira_tickets(pr_results: list[dict], token: str) -> None:
+    """Search Jira for each unique failing test and attach ticket info to failure dicts."""
+    unique_methods = {
+        f["method"]
+        for pr in pr_results for ed in ["ce", "ee", "b2b"]
+        for f in pr["editions"].get(ed, {}).get("failures", [])
+    }
+    if not unique_methods:
+        return
+    print(f"\n3. Fetching Jira tickets for {len(unique_methods)} unique failing test(s)...", flush=True)
+    jira_map: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        futures = {ex.submit(search_jira_for_test, m, token): m for m in unique_methods}
+        for fut in as_completed(futures):
+            m = futures[fut]
+            try:
+                ticket = fut.result()
+                if ticket:
+                    jira_map[m] = ticket
+                    print(f"  {m[:60]} → {ticket['key']} ({ticket['status']})", flush=True)
+            except Exception:
+                pass
+    # Attach jira field to each failure dict in-place
+    for pr in pr_results:
+        for ed in ["ce", "ee", "b2b"]:
+            for f in pr["editions"].get(ed, {}).get("failures", []):
+                if f["method"] in jira_map:
+                    f["jira"] = jira_map[f["method"]]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # PR analysis
 # ──────────────────────────────────────────────────────────────────────────────
 def analyze_pr(repo: str, pr_number: int) -> dict:
@@ -373,6 +435,16 @@ def failure_count_badge(edition_data: dict) -> str:
     return f'<span class="badge fail">{n} FAIL</span>'
 
 
+def jira_badge(ticket: Optional[dict]) -> str:
+    if not ticket:
+        return ""
+    status = html.escape(ticket["status"])
+    url    = html.escape(ticket["url"])
+    key    = html.escape(ticket["key"])
+    cls    = "jira-open" if ticket["status"] not in ("Done", "Cancelled") else "jira-done"
+    return f' <a href="{url}" target="_blank" class="jira-badge {cls}">{key} · {status}</a>'
+
+
 def render_failures_table(failures: list[dict], report_url: Optional[str]) -> str:
     if not failures:
         return ""
@@ -380,7 +452,7 @@ def render_failures_table(failures: list[dict], report_url: Optional[str]) -> st
     for f in failures:
         method = html.escape(f["method"])
         status_cls = "broken" if f["status"] == "broken" else "failed"
-        rows += f'<tr><td><code class="{status_cls}">{method}</code></td></tr>'
+        rows += f'<tr><td><code class="{status_cls}">{method}</code>{jira_badge(f.get("jira"))}</td></tr>'
     report_link = f'<a href="{html.escape(report_url)}" target="_blank">Open Allure Report ↗</a>' if report_url else ""
     return f"""
     <table class="failures">
@@ -471,17 +543,21 @@ def render_pr_card(pr: dict) -> str:
 def render_all_failures_table(prs: list[dict]) -> str:
     from collections import Counter
     counts: Counter = Counter()
+    jira_by_method: dict = {}
     for pr in prs:
         for edition in ["ce", "ee", "b2b"]:
             for f in pr["editions"].get(edition, {}).get("failures", []):
                 counts[f["method"]] += 1
+                if f.get("jira") and f["method"] not in jira_by_method:
+                    jira_by_method[f["method"]] = f["jira"]
     if not counts:
         return '<p class="muted">No test failures recorded.</p>'
     rows = ""
     for method, count in counts.most_common():
+        ticket_html = jira_badge(jira_by_method.get(method))
         rows += f"""
       <tr>
-        <td><code class="failed">{html.escape(method)}</code></td>
+        <td><code class="failed">{html.escape(method)}</code>{ticket_html}</td>
         <td style="text-align:center;white-space:nowrap"><span class="badge fail">{count}</span></td>
       </tr>"""
     return f"""
@@ -610,6 +686,15 @@ def render_html(branch: str, prs: list[dict], generated_at: str) -> str:
     .fail-bg {{ background: #2d1517; }}
     .pass-bg {{ background: #12261e; }}
 
+    /* Jira ticket badge */
+    .jira-badge {{ display: inline-block; margin-left: 8px; padding: 1px 7px;
+                    border-radius: 4px; font-size: 0.72rem; font-weight: 600;
+                    white-space: nowrap; text-decoration: none; }}
+    .jira-open {{ background: #1c3a5e; color: #79c0ff; border: 1px solid #1f6feb; }}
+    .jira-open:hover {{ background: #1f6feb; color: #fff; }}
+    .jira-done {{ background: #21262d; color: #8b949e; border: 1px solid #30363d; }}
+    .jira-done:hover {{ background: #30363d; color: #c9d1d9; }}
+
     footer {{ margin-top: 48px; padding-top: 16px; border-top: 1px solid #21262d;
                text-align: center; color: #6e7681; font-size: 0.8rem; }}
   </style>
@@ -668,6 +753,8 @@ def main():
                         help="Manually specify PR numbers (skips Slack)")
     parser.add_argument("--read-only", action="store_true",
                         help="Don't post to Slack; just read the latest qmbot response from the channel")
+    parser.add_argument("--jira-token", default=os.getenv("JIRA_TOKEN", ""),
+                        help="Jira personal access token for ticket lookup (or set JIRA_TOKEN env var)")
     args = parser.parse_args()
 
     print(f"\n🐛 QueuePilot — {args.branch}\n")
@@ -740,7 +827,11 @@ def main():
 
     pr_results.sort(key=lambda x: pr_numbers.index(x["pr_number"]))
 
-    # ── Step 3: Generate HTML ──────────────────────────────────────────────────
+    # ── Step 3: Fetch Jira tickets ────────────────────────────────────────────
+    if args.jira_token:
+        fetch_jira_tickets(pr_results, args.jira_token)
+
+    # ── Step 4: Generate HTML ──────────────────────────────────────────────────
     now = datetime.now()
     generated_at = now.strftime("%Y-%m-%d %H:%M:%S")
     html_content = render_html(args.branch, pr_results, generated_at)
