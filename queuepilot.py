@@ -36,7 +36,7 @@ DEFAULT_REPO       = "magento-commerce/magento2ce"
 DEFAULT_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
 BOT_WAIT_TIMEOUT   = 90   # seconds to wait for bot reply
 ALLURE_WORKER_MAX  = 10   # parallel workers per PR for test-case fetches
-PR_WORKER_MAX      = 4    # parallel PR analyses
+PR_WORKER_MAX      = 5    # parallel PR analyses
 
 
 # ──────────────────────────────────────────────────────────────────────────────
