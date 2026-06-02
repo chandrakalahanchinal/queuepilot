@@ -315,17 +315,18 @@ def analyze_pr(repo: str, pr_number: int) -> dict:
 
         if report_url:
             base = allure_base(report_url)
-            # Retry up to 5 times — report may still be uploading or server may be busy
-            for attempt in range(5):
+            # Retry up to 8 times — report upload can lag behind the check-run completion
+            for attempt in range(8):
                 uids = get_failed_uids(base)
-                failures = resolve_failures(base, uids)
-                if failures:
-                    break
-                prom_stats = get_prometheus_stats(base)
-                if prom_stats:
-                    break
-                if attempt < 4:
+                if uids:
+                    failures = resolve_failures(base, uids)
+                    if failures:
+                        break
+                if attempt < 7:
                     time.sleep(5)
+            # Only fall back to prometheus counts if all retries for test names failed
+            if not failures:
+                prom_stats = get_prometheus_stats(base)
 
         result["editions"][edition] = {
             "status":      "failure",
