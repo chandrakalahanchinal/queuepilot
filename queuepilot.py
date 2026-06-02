@@ -525,11 +525,13 @@ def render_html(branch: str, prs: list[dict], generated_at: str) -> str:
     summary_table    = render_summary_table(prs)
     all_fails_table  = render_all_failures_table(prs)
     pr_cards         = "\n".join(render_pr_card(pr) for pr in prs)
-    total_prs     = len(prs)
-    total_fails   = sum(
-        len(pr["editions"].get(ed, {}).get("failures", []))
+    total_prs   = len(prs)
+    unique_tests = {
+        f["method"]
         for pr in prs for ed in ["ce", "ee", "b2b"]
-    )
+        for f in pr["editions"].get(ed, {}).get("failures", [])
+    }
+    total_fails = len(unique_tests)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -621,7 +623,7 @@ def render_html(branch: str, prs: list[dict], generated_at: str) -> str:
 
     <div class="stats">
       <div class="stat-box"><div class="num">{total_prs}</div><div class="lbl">PRs in queue</div></div>
-      <div class="stat-box"><div class="num">{total_fails}</div><div class="lbl">Total failures</div></div>
+      <div class="stat-box"><div class="num">{total_fails}</div><div class="lbl">Unique failing tests</div></div>
     </div>
 
     <div class="summary-section">
