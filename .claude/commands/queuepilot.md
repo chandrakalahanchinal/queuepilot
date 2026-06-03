@@ -10,9 +10,10 @@ Run the QueuePilot tool to analyze Magento PR queue failures and generate an HTM
 
 4. Run the QueuePilot analysis script with the PR numbers and capture its output:
    ```
-   python3 REPO_PATH/queuepilot.py $ARGUMENTS --prs <pr1> <pr2> ...
+   python3 REPO_PATH/queuepilot.py $ARGUMENTS --prs <pr1> <pr2> ... --jira-token NDAyMDU1NDE1MTxxOniCItVCD8QEttEaH940E18nDA4V
    ```
    The script prints the saved report path in the form `Open with: open <path>`. Parse that path from stdout.
+   The script will automatically post the dashboard summary and file to Slack if SLACK_TOKEN is set in the environment.
 
 5. Open the report using the path parsed from the script output:
    ```

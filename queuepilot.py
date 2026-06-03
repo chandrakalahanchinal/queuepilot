@@ -99,6 +99,104 @@ def parse_pr_numbers(bot_text: str) -> list[int]:
     return [int(m) for m in re.findall(r"magento2ce[^\|]+?#(\d+)", bot_text)]
 
 
+def slack_upload_html(token: str, channel: str, filepath: str, filename: str) -> Optional[str]:
+    """Upload HTML report to Slack, return permalink or None."""
+    try:
+        # Step 1: get upload URL
+        r = requests.post(
+            "https://slack.com/api/files.getUploadURLExternal",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"filename": filename, "length": os.path.getsize(filepath)},
+            timeout=15,
+        )
+        data = r.json()
+        if not data.get("ok"):
+            return None
+        upload_url = data["upload_url"]
+        file_id    = data["file_id"]
+
+        # Step 2: upload file bytes
+        with open(filepath, "rb") as f:
+            requests.put(upload_url, data=f, timeout=60)
+
+        # Step 3: complete + share to channel
+        r = requests.post(
+            "https://slack.com/api/files.completeUploadExternal",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"files": [{"id": file_id}], "channel_id": channel},
+            timeout=15,
+        )
+        data = r.json()
+        if not data.get("ok"):
+            return None
+        return data.get("files", [{}])[0].get("permalink")
+    except Exception:
+        return None
+
+
+def slack_post_dashboard(token: str, channel: str, branch: str,
+                         prs: list[dict], permalink: Optional[str]) -> None:
+    """Post a formatted QueuePilot summary to Slack."""
+    unique_tests = {
+        f["method"]
+        for pr in prs for ed in ["ce", "ee", "b2b"]
+        for f in pr["editions"].get(ed, {}).get("failures", [])
+    }
+
+    header = (
+        f"*🐛 QueuePilot — `{branch}`*\n"
+        f"*{len(prs)} PR(s)* in queue  ·  *{len(unique_tests)} unique failing test(s)*"
+    )
+    if permalink:
+        header += f"\n📊 <{permalink}|Open Full Dashboard>"
+
+    blocks: list[dict] = [{"type": "section", "text": {"type": "mrkdwn", "text": header}}]
+
+    for pr in prs:
+        def _badge(ed_key: str) -> str:
+            ed = pr["editions"].get(ed_key, {"status": "not_run", "failures": []})
+            s = ed.get("status", "not_run")
+            if s == "failure":
+                n = len(ed.get("failures", []))
+                return f"*{n} FAIL*" if n else "—"
+            return {"success": "✅ PASS", "in_progress": "⏳ RUNNING",
+                    "not_run": "N/A"}.get(s, s.upper())
+
+        pr_text = (
+            f"*<{pr['url']}|#{pr['pr_number']}>* {pr['title'][:55]}\n"
+            f"by *{pr['author']}*  ·  "
+            f"CE: {_badge('ce')}  EE: {_badge('ee')}  B2B: {_badge('b2b')}"
+        )
+
+        # Collect unique failing tests with Jira links
+        seen: dict[str, dict] = {}
+        for ed_key in ["ce", "ee", "b2b"]:
+            for f in pr["editions"].get(ed_key, {}).get("failures", []):
+                if f["method"] not in seen:
+                    seen[f["method"]] = f
+        if seen:
+            lines = []
+            for f in sorted(seen.values(), key=lambda x: x["method"]):
+                j = f.get("jira")
+                ticket = f"  → <{j['url']}|{j['key']}> _{j['status']}_" if j else ""
+                lines.append(f"  • `{f['method']}`{ticket}")
+            pr_text += "\n" + "\n".join(lines)
+
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": pr_text}})
+        blocks.append({"type": "divider"})
+
+    try:
+        requests.post(
+            "https://slack.com/api/chat.postMessage",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"channel": channel, "blocks": blocks, "text": f"QueuePilot — {branch}"},
+            timeout=15,
+        ).raise_for_status()
+        print(f"  ✅ Summary posted to Slack channel #{channel}", flush=True)
+    except Exception as e:
+        print(f"  ⚠ Slack post failed: {e}", flush=True)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # GitHub
 # ──────────────────────────────────────────────────────────────────────────────
@@ -863,6 +961,20 @@ def main():
     print(f"\n✅ Done! Report saved to:\n   {output_path}")
     print(f"   ~/Downloads/{os.path.basename(output_path)}\n")
     print(f"   Open with: open {output_path}\n")
+
+    # ── Step 5: Post to Slack ──────────────────────────────────────────────────
+    slack_token = os.getenv("SLACK_TOKEN", "")
+    if slack_token:
+        print("5. Posting dashboard to Slack...", flush=True)
+        permalink = slack_upload_html(
+            slack_token, args.channel,
+            output_path, os.path.basename(output_path),
+        )
+        if permalink:
+            print(f"   Dashboard uploaded: {permalink}", flush=True)
+        else:
+            print("   ⚠ File upload failed (token may lack files:write scope) — posting summary only.", flush=True)
+        slack_post_dashboard(slack_token, args.channel, args.branch, pr_results, permalink)
 
 
 if __name__ == "__main__":
