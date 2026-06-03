@@ -96,7 +96,23 @@ def wait_for_bot_reply(token: str, channel: str, bot_id: str, after_ts: str,
 
 
 def parse_pr_numbers(bot_text: str) -> list[int]:
+    # Legacy: used only for --prs manual mode (single repo)
     return [int(m) for m in re.findall(r"magento2ce[^\|]+?#(\d+)", bot_text)]
+
+
+def parse_pr_list(bot_text: str) -> list[dict]:
+    """Parse (repo, pr_number) pairs from qmbot's GitHub PR URLs.
+    Supports any repo under magento-commerce, e.g. magento2ce, magento2ee, magento2b2b.
+    Returns list of {"repo": "magento-commerce/reponame", "pr_number": 12345}.
+    """
+    seen = set()
+    results = []
+    for m in re.finditer(r"github\.com/(magento-commerce/[\w.-]+)/pull/(\d+)", bot_text):
+        key = (m.group(1), int(m.group(2)))
+        if key not in seen:
+            seen.add(key)
+            results.append({"repo": m.group(1), "pr_number": int(m.group(2))})
+    return results
 
 
 def slack_upload_html(token: str, channel: str, filepath: str, filename: str) -> Optional[str]:
@@ -860,9 +876,13 @@ def main():
     # ── Step 1: Get PR list ────────────────────────────────────────────────────
     pr_numbers = []
 
+    # pr_queue: list of {"repo": str, "pr_number": int}
+    pr_queue: list[dict] = []
+
     if args.prs:
-        pr_numbers = args.prs
-        print(f"Using provided PRs: {pr_numbers}")
+        # Manual mode — use --repo as default for all specified PRs
+        pr_queue = [{"repo": args.repo, "pr_number": n} for n in args.prs]
+        print(f"Using provided PRs: {[p['pr_number'] for p in pr_queue]}")
     else:
         token = os.getenv("SLACK_TOKEN")
         if not token:
@@ -870,7 +890,6 @@ def main():
             sys.exit(1)
 
         if args.read_only:
-            # Read latest qmbot response without posting (message sent externally e.g. via MCP)
             print(f"1. Reading latest qmbot response from #{args.channel}...")
             msgs = slack_history(token, args.channel, oldest="0", limit=50)
             bot_text = None
@@ -904,26 +923,29 @@ def main():
             print("ERROR: Timed out waiting for bot response.")
             sys.exit(1)
 
-        pr_numbers = parse_pr_numbers(bot_text)
-        if not pr_numbers:
+        # Parse repo + PR number from GitHub URLs in qmbot's response
+        pr_queue = parse_pr_list(bot_text)
+        if not pr_queue:
             print(f"ERROR: Could not parse PR numbers from bot reply:\n{bot_text}")
             sys.exit(1)
 
-        print(f"   Found {len(pr_numbers)} PR(s): {pr_numbers}")
+        print(f"   Found {len(pr_queue)} PR(s): { [(p['repo'], p['pr_number']) for p in pr_queue] }")
 
     # ── Step 2: Analyze PRs ────────────────────────────────────────────────────
-    print(f"\n2. Analyzing {len(pr_numbers)} PR(s)...")
+    print(f"\n2. Analyzing {len(pr_queue)} PR(s)...")
     pr_results = []
     with ThreadPoolExecutor(max_workers=PR_WORKER_MAX) as ex:
-        futures = {ex.submit(analyze_pr, args.repo, n): n for n in pr_numbers}
+        futures = {ex.submit(analyze_pr, p["repo"], p["pr_number"]): p for p in pr_queue}
         for fut in as_completed(futures):
-            pr_num = futures[fut]
+            p = futures[fut]
             try:
                 pr_results.append(fut.result())
             except Exception as e:
-                print(f"  WARNING: Failed to analyze PR #{pr_num}: {e}")
+                print(f"  WARNING: Failed to analyze PR #{p['pr_number']} ({p['repo']}): {e}")
 
-    pr_results.sort(key=lambda x: pr_numbers.index(x["pr_number"]))
+    pr_results.sort(key=lambda x: next(
+        i for i, p in enumerate(pr_queue) if p["pr_number"] == x["pr_number"]
+    ))
 
     # ── Step 3: Fetch Jira tickets ────────────────────────────────────────────
     if args.jira_token:

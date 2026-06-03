@@ -56,22 +56,42 @@ def slack_history() -> list:
     return data.get("messages", [])
 
 
-def parse_prs(text: str) -> list[int]:
-    return [int(m) for m in re.findall(r"magento2ce[^\|]+?#(\d+)", text)]
+def parse_prs(text: str) -> list[dict]:
+    """Parse (repo, pr_number) pairs from qmbot's GitHub PR URLs.
+    Supports any repo under magento-commerce.
+    """
+    seen: set = set()
+    results = []
+    for m in re.finditer(r"github\.com/(magento-commerce/[\w.-]+)/pull/(\d+)", text):
+        key = (m.group(1), int(m.group(2)))
+        if key not in seen:
+            seen.add(key)
+            results.append({"repo": m.group(1), "pr_number": int(m.group(2))})
+    return results
 
 
-def run_queuepilot(prs: list[int]) -> None:
-    cmd = [
-        sys.executable, str(SCRIPT),
-        "2.4-develop",
-        "--prs", *[str(n) for n in prs],
-        "--jira-token", JIRA_TOKEN,
-    ]
+def run_queuepilot(prs: list[dict]) -> None:
+    """Run queuepilot.py for a list of {"repo": ..., "pr_number": ...} dicts.
+    Groups by repo and runs once per repo batch.
+    """
+    from collections import defaultdict
+    by_repo: dict = defaultdict(list)
+    for p in prs:
+        by_repo[p["repo"]].append(p["pr_number"])
+
     env = {**os.environ, "SLACK_TOKEN": SLACK_TOKEN, "JIRA_TOKEN": JIRA_TOKEN}
-    log(f"Running QueuePilot for PRs: {prs}")
-    result = subprocess.run(cmd, text=True, env=env, cwd=SCRIPT_DIR)
-    if result.returncode != 0:
-        log(f"QueuePilot exited with code {result.returncode}")
+    for repo, numbers in by_repo.items():
+        log(f"Running QueuePilot for {repo} PRs: {numbers}")
+        cmd = [
+            sys.executable, str(SCRIPT),
+            "2.4-develop",
+            "--repo", repo,
+            "--prs", *[str(n) for n in numbers],
+            "--jira-token", JIRA_TOKEN,
+        ]
+        result = subprocess.run(cmd, text=True, env=env, cwd=SCRIPT_DIR)
+        if result.returncode != 0:
+            log(f"QueuePilot exited with code {result.returncode} for {repo}")
 
 
 def main() -> None:
@@ -108,7 +128,7 @@ def main() -> None:
                     log(f"qmbot message has no PRs (empty queue?), skipping.")
                     continue
 
-                log(f"New qmbot message detected! PRs: {prs}")
+                log(f"New qmbot message detected! PRs: {[(p['repo'], p['pr_number']) for p in prs]}")
                 run_queuepilot(prs)   # posts to Slack automatically via SLACK_TOKEN
                 state["last_processed_ts"] = ts
                 save_state(state)
