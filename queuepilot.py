@@ -301,8 +301,8 @@ def _dedup_uids(results: list[dict]) -> list[dict]:
 
 
 def get_failed_uids(base_url: str) -> list[dict]:
-    """Try categories.json first, fall back to suites.json."""
-    for endpoint in ("data/categories.json", "data/suites.json"):
+    """Try categories → suites → behaviors until one yields failures."""
+    for endpoint in ("data/categories.json", "data/suites.json", "data/behaviors.json"):
         data = fetch_json(f"{base_url}/{endpoint}")
         if not data:
             continue
@@ -491,16 +491,21 @@ def analyze_pr(repo: str, pr_number: int) -> dict:
 
         if report_url:
             base = allure_base(report_url)
-            # Retry up to 8 times — report upload can lag behind the check-run completion
-            for attempt in range(8):
+            # Retry up to 20 times (10 min max) — Allure report upload is async
+            # and can lag several minutes behind the check-run completing.
+            MAX_ATTEMPTS = 20
+            RETRY_SLEEP  = 30
+            for attempt in range(MAX_ATTEMPTS):
                 uids = get_failed_uids(base)
                 if uids:
                     failures = resolve_failures(base, uids)
                     if failures:
                         break
-                if attempt < 7:
-                    time.sleep(5)
-            # Only fall back to prometheus counts if all retries for test names failed
+                if attempt < MAX_ATTEMPTS - 1:
+                    print(f"  [PR #{pr_number}] {edition.upper()} Allure data not ready "
+                          f"(attempt {attempt + 1}/{MAX_ATTEMPTS}), retrying in {RETRY_SLEEP}s...", flush=True)
+                    time.sleep(RETRY_SLEEP)
+            # Fall back to prometheus counts if individual test names couldn't be fetched
             if not failures:
                 prom_stats = get_prometheus_stats(base)
 
