@@ -491,9 +491,9 @@ def analyze_pr(repo: str, pr_number: int) -> dict:
 
         if report_url:
             base = allure_base(report_url)
-            # Retry up to 20 times (10 min max) — Allure report upload is async
-            # and can lag several minutes behind the check-run completing.
-            MAX_ATTEMPTS = 20
+            # Retry for ~2 min — Allure upload is async but usually lands quickly;
+            # give up after 4 attempts so the report isn't held up by missing editions.
+            MAX_ATTEMPTS = 4
             RETRY_SLEEP  = 30
             for attempt in range(MAX_ATTEMPTS):
                 uids = get_failed_uids(base)
