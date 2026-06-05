@@ -439,7 +439,7 @@ def fetch_jira_tickets(pr_results: list[dict], token: str) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 # PR analysis
 # ──────────────────────────────────────────────────────────────────────────────
-def analyze_pr(repo: str, pr_number: int) -> dict:
+def analyze_pr(repo: str, pr_number: int, allure_attempts: int = 4) -> dict:
     print(f"  [PR #{pr_number}] Fetching info...", flush=True)
     pr_info  = get_pr_info(repo, pr_number)
     sha      = pr_info["headRefOid"]
@@ -491,9 +491,7 @@ def analyze_pr(repo: str, pr_number: int) -> dict:
 
         if report_url:
             base = allure_base(report_url)
-            # Retry for ~2 min — Allure upload is async but usually lands quickly;
-            # give up after 4 attempts so the report isn't held up by missing editions.
-            MAX_ATTEMPTS = 4
+            MAX_ATTEMPTS = allure_attempts
             RETRY_SLEEP  = 30
             for attempt in range(MAX_ATTEMPTS):
                 uids = get_failed_uids(base)
@@ -874,6 +872,8 @@ def main():
                         help="Don't post to Slack; just read the latest qmbot response from the channel")
     parser.add_argument("--jira-token", default=os.getenv("JIRA_TOKEN", ""),
                         help="Jira personal access token for ticket lookup (or set JIRA_TOKEN env var)")
+    parser.add_argument("--allure-attempts", type=int, default=4,
+                        help="Max retry attempts for Allure data (default 4 = ~2 min; use 15 for ~7 min)")
     args = parser.parse_args()
 
     print(f"\n🐛 QueuePilot — {args.branch}\n")
@@ -940,7 +940,7 @@ def main():
     print(f"\n2. Analyzing {len(pr_queue)} PR(s)...")
     pr_results = []
     with ThreadPoolExecutor(max_workers=PR_WORKER_MAX) as ex:
-        futures = {ex.submit(analyze_pr, p["repo"], p["pr_number"]): p for p in pr_queue}
+        futures = {ex.submit(analyze_pr, p["repo"], p["pr_number"], args.allure_attempts): p for p in pr_queue}
         for fut in as_completed(futures):
             p = futures[fut]
             try:

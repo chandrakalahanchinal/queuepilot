@@ -79,6 +79,7 @@ def run_queuepilot(prs: list[dict]) -> None:
         "2.4-develop",
         "--read-only",
         "--jira-token", JIRA_TOKEN,
+        "--allure-attempts", "15",   # ~7 min — watcher runs in background, no rush
     ]
     result = subprocess.run(cmd, text=True, env=env, cwd=SCRIPT_DIR)
     if result.returncode != 0:
