@@ -991,7 +991,7 @@ def main():
 
     # ── Step 5: Post to Slack ──────────────────────────────────────────────────
     slack_token = os.getenv("SLACK_TOKEN", "")
-    if slack_token:
+    if slack_token and not args.no_slack:
         print("5. Posting dashboard to Slack...", flush=True)
         permalink = slack_upload_html(
             slack_token, args.channel,
