@@ -6,15 +6,15 @@ Evidence-based triage of Magento functional test failures (CE / EE / B2B / SVC) 
 
 ## How it works
 
-1. You send `@qmbot dq 2.4-develop` in `#pr-queue-dashboard`
-2. Once qmbot replies with the PR list, run `/queuepilot 2.4-develop` in Claude Code
-3. QueuePilot reads qmbot's response, analyzes all PRs, generates an HTML dashboard, and posts the summary back to `#pr-queue-dashboard`
+1. Start the watcher once (keeps running in the background)
+2. Send `@qmbot dq 2.4-develop` in `#pr-queue-dashboard`
+3. qmbot replies with the PR list → watcher automatically runs the analysis and posts the report to the channel
+
+That's it. No other commands needed.
 
 ---
 
 ## Team Setup
-
-Follow these steps once on each machine.
 
 ### 1. Prerequisites
 
@@ -22,9 +22,8 @@ Follow these steps once on each machine.
 |------|---------|--------|
 | Python 3.10+ | [python.org](https://www.python.org/downloads/) | `python3 --version` |
 | GitHub CLI | `brew install gh` | `gh --version` |
-| Claude Code | [claude.ai/code](https://claude.ai/code) | `claude --version` |
 
-### 2. Clone the repo
+### 2. Clone and install
 
 ```bash
 git clone https://github.com/chandrakalahanchinal/queuepilot.git
@@ -39,68 +38,55 @@ gh auth login
 # Select: GitHub.com → HTTPS → Login with a web browser
 ```
 
-### 4. Set up the slash command
+### 4. Set your tokens
 
 ```bash
-mkdir -p ~/.claude/commands
-cp .claude/commands/queuepilot.md ~/.claude/commands/queuepilot.md
+export SLACK_TOKEN=xoxb-your-token-here
+export JIRA_TOKEN=your-jira-token   # optional, enables Jira ticket links
 ```
 
-Open `~/.claude/commands/queuepilot.md` and replace `REPO_PATH` with your absolute clone path (`pwd` inside the repo).
+Add these to your shell profile (`~/.zshrc` or `~/.bash_profile`) to make them permanent.
 
-### 5. Connect Slack in Claude Code
-
-1. Open Claude Code → **Settings** → **Integrations** → connect **Slack**
-2. If `#pr-queue-dashboard` is private, invite the bots once from inside the channel:
-   ```
-   /invite @slack_connector
-   /invite @qmbot
-   ```
-
-### 6. Pre-approve shell commands (recommended)
+### 5. Start the watcher
 
 ```bash
-mkdir -p .claude
-cat > .claude/settings.local.json << 'EOF'
-{
-  "permissions": {
-    "allow": [
-      "mcp__claude_ai_Slack__slack_read_channel",
-      "Bash"
-    ]
-  },
-  "env": {
-    "JIRA_TOKEN": "<your-jira-token>"
-  }
-}
-EOF
+python3 watch.py
 ```
+
+Keep this terminal open (or run it in the background). The watcher polls `#pr-queue-dashboard` every 30 seconds.
 
 ---
 
 ## Usage
 
-### Via Claude Code slash command (recommended)
+Once the watcher is running, just send the command in Slack:
 
 ```
-/queuepilot 2.4-develop
+@qmbot dq 2.4-develop
 ```
 
-Make sure you've already sent `@qmbot dq 2.4-develop` in the channel and qmbot has replied before running this.
+After qmbot replies with the PR list, QueuePilot will automatically:
+- Fetch GitHub check-run results for every PR
+- Extract failing test names from Allure reports (CE / EE / B2B) in parallel
+- Look up ACQE Jira tickets for each failing test
+- Generate an HTML dashboard saved to `reports/` and `~/Downloads/`
+- Post the formatted summary to `#pr-queue-dashboard`
 
-### Direct CLI
+---
+
+## Manual run (optional)
+
+If the watcher isn't running, you can trigger the report manually after qmbot has already replied:
 
 ```bash
 export SLACK_TOKEN=xoxb-your-token-here
-
-# Read qmbot's latest response and generate report
 python3 queuepilot.py 2.4-develop
+```
 
-# Pass PR numbers directly (no Slack required)
+Or pass PR numbers directly (no Slack needed):
+
+```bash
 python3 queuepilot.py 2.4-develop --prs 10737 10740 10741
-
-# With Jira ticket lookup
-python3 queuepilot.py 2.4-develop --jira-token <token>
 ```
 
 ---
@@ -126,13 +112,13 @@ options:
 
 ## Environment variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `SLACK_TOKEN` | Slack bot token (`xoxb-...`) — reads qmbot response and posts results | required unless `--prs` |
-| `JIRA_TOKEN` | Jira personal access token — enables ticket lookup | optional |
-| `SLACK_CHANNEL` | Override default channel ID | `C0B400Y1ZU2` |
-| `SLACK_BOT_ID` | Override default bot user ID | `W015DAXESG0` |
-| `GITHUB_REPO` | Override GitHub repo slug | `magento-commerce/magento2ce` |
+| Variable | Description |
+|----------|-------------|
+| `SLACK_TOKEN` | Slack bot token (`xoxb-...`) — required |
+| `JIRA_TOKEN` | Jira personal access token — optional, enables ticket lookup |
+| `SLACK_CHANNEL` | Override default channel ID (`C0B400Y1ZU2`) |
+| `SLACK_BOT_ID` | Override default bot user ID (`W015DAXESG0`) |
+| `GITHUB_REPO` | Override GitHub repo slug (`magento-commerce/magento2ce`) |
 
 ---
 
@@ -140,26 +126,11 @@ options:
 
 Each HTML report contains:
 
-1. **Stats bar** — PR count and unique failing test count (deduplicated across editions)
-2. **Queue summary table** — all PRs at a glance with CE / EE / B2B / SVC badges
-3. **All Failing Tests table** — every unique failing test aggregated across all PRs and editions, sorted by fail frequency, with Jira ticket links
-4. **Per-PR failure cards** — 3-column layout (CE | EE | B2B) with full test names, Jira badges, Allure links, and Jenkins links
+1. **Stats bar** — PR count and unique failing test count
+2. **Queue summary table** — all PRs with CE / EE / B2B / SVC badges
+3. **All Failing Tests table** — deduplicated, sorted by fail frequency, with Jira links
+4. **Per-PR failure cards** — CE | EE | B2B columns with test names, Jira badges, Allure/Jenkins links
 
 Reports are saved to:
 - `reports/queuepilot-2.4-develop-YYYY-MM-DD-N.html`
 - `~/Downloads/queuepilot-2.4-develop-YYYY-MM-DD-N.html`
-
-## Slack summary format
-
-After every run, a message is posted to `#pr-queue-dashboard`:
-
-```
-🐛 QueuePilot — `2.4-develop`
-*2 PR(s)* in queue · *7 unique failing test(s)*
-
-*#10758* [Support Tier-4 flowers] — thiaramus
-CE: 1 FAIL | EE: 4 FAIL | B2B: 6 FAIL
-  • `AdminUserSetStatusForEachSourceItemTest` → ACQE-9629 (Tech Analysis)
-  • `StorefrontCheckTermsAndConditionIsPresentInPaymentPageTest` → ACQE-10249 (Options Queue)
-  ...
-```
