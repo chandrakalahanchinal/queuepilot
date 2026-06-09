@@ -121,7 +121,7 @@ options:
   --no-slack          Skip posting results to Slack
   --prs N [N ...]     Skip Slack, use these PR numbers directly
   --jira-token TOKEN  Jira personal access token for ticket lookup
-  --allure-attempts N Max retries for Allure data (default: 4, ~2 min)
+  --allure-attempts N Max retries for Allure data (default: 2, ~10s)
 ```
 
 ## Environment variables

@@ -397,10 +397,62 @@ def fetch_jira_tickets(pr_results: list[dict], token: str) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 # PR analysis
 # ──────────────────────────────────────────────────────────────────────────────
-def analyze_pr(repo: str, pr_number: int, allure_attempts: int = 4) -> dict:
+ALLURE_RETRY_SLEEP = 10  # seconds between Allure retry attempts
+
+
+def _analyze_edition(edition: str, cr: dict, pr_number: int, allure_attempts: int) -> tuple[str, dict]:
+    """Analyze one edition's check run. Runs in a thread — returns (edition, data)."""
+    conclusion  = cr.get("conclusion")
+    cr_status   = cr.get("status", "")
+    summary     = cr.get("output", {}).get("summary", "")
+    report_url  = extract_allure_url(summary, edition)
+    jenkins_url = cr.get("details_url", "")
+
+    if cr_status in ("in_progress", "queued") and conclusion is None:
+        return edition, {"status": "in_progress", "failures": [], "report_url": report_url, "jenkins_url": jenkins_url}
+
+    if conclusion is None:
+        conclusion = "unknown"
+
+    if conclusion != "failure":
+        return edition, {"status": conclusion, "failures": [], "report_url": report_url, "jenkins_url": jenkins_url}
+
+    print(f"  [PR #{pr_number}] Fetching {edition.upper()} Allure failures...", flush=True)
+    failures = []
+    prom_stats = None
+
+    if not report_url and jenkins_url:
+        print(f"  [PR #{pr_number}] No Allure URL — checking Jenkins for {edition.upper()}...", flush=True)
+        report_url = find_allure_url_from_jenkins(jenkins_url, edition)
+
+    if report_url:
+        base = allure_base(report_url)
+        for attempt in range(allure_attempts):
+            uids = get_failed_uids(base)
+            if uids:
+                failures = resolve_failures(base, uids)
+                if failures:
+                    break
+            if attempt < allure_attempts - 1:
+                print(f"  [PR #{pr_number}] {edition.upper()} Allure not ready "
+                      f"(attempt {attempt + 1}/{allure_attempts}), retrying in {ALLURE_RETRY_SLEEP}s...", flush=True)
+                time.sleep(ALLURE_RETRY_SLEEP)
+        if not failures:
+            prom_stats = get_prometheus_stats(base)
+
+    return edition, {
+        "status":      "failure",
+        "failures":    failures,
+        "report_url":  report_url,
+        "jenkins_url": jenkins_url,
+        "prom_stats":  prom_stats,
+    }
+
+
+def analyze_pr(repo: str, pr_number: int, allure_attempts: int = 2) -> dict:
     print(f"  [PR #{pr_number}] Fetching info...", flush=True)
-    pr_info  = get_pr_info(repo, pr_number)
-    sha      = pr_info["headRefOid"]
+    pr_info    = get_pr_info(repo, pr_number)
+    sha        = pr_info["headRefOid"]
     check_runs = get_check_runs(repo, sha)
     check_map  = {cr["name"]: cr for cr in check_runs}
 
@@ -414,64 +466,18 @@ def analyze_pr(repo: str, pr_number: int, allure_attempts: int = 4) -> dict:
         "svc":       None,
     }
 
-    for edition in ["ce", "ee", "b2b"]:
-        check_name = f"Functional Tests {edition.upper()}"
-        cr = check_map.get(check_name)
-        if not cr:
-            result["editions"][edition] = {"status": "not_run", "failures": [], "report_url": None}
-            continue
-
-        conclusion   = cr.get("conclusion")
-        cr_status    = cr.get("status", "")
-        summary      = cr.get("output", {}).get("summary", "")
-        report_url   = extract_allure_url(summary, edition)
-        jenkins_url  = cr.get("details_url", "")
-
-        if cr_status in ("in_progress", "queued") and conclusion is None:
-            result["editions"][edition] = {"status": "in_progress", "failures": [], "report_url": report_url, "jenkins_url": jenkins_url}
-            continue
-
-        if conclusion is None:
-            conclusion = "unknown"
-
-        if conclusion != "failure":
-            result["editions"][edition] = {"status": conclusion, "failures": [], "report_url": report_url, "jenkins_url": jenkins_url}
-            continue
-
-        print(f"  [PR #{pr_number}] Fetching {edition.upper()} Allure failures...", flush=True)
-        failures = []
-        prom_stats = None
-
-        # If no Allure URL in check summary, try scraping it from the Jenkins build page
-        if not report_url and jenkins_url:
-            print(f"  [PR #{pr_number}] No Allure URL found — checking Jenkins build page for {edition.upper()}...", flush=True)
-            report_url = find_allure_url_from_jenkins(jenkins_url, edition)
-
-        if report_url:
-            base = allure_base(report_url)
-            MAX_ATTEMPTS = allure_attempts
-            RETRY_SLEEP  = 30
-            for attempt in range(MAX_ATTEMPTS):
-                uids = get_failed_uids(base)
-                if uids:
-                    failures = resolve_failures(base, uids)
-                    if failures:
-                        break
-                if attempt < MAX_ATTEMPTS - 1:
-                    print(f"  [PR #{pr_number}] {edition.upper()} Allure data not ready "
-                          f"(attempt {attempt + 1}/{MAX_ATTEMPTS}), retrying in {RETRY_SLEEP}s...", flush=True)
-                    time.sleep(RETRY_SLEEP)
-            # Fall back to prometheus counts if individual test names couldn't be fetched
-            if not failures:
-                prom_stats = get_prometheus_stats(base)
-
-        result["editions"][edition] = {
-            "status":      "failure",
-            "failures":    failures,
-            "report_url":  report_url,
-            "jenkins_url": jenkins_url,
-            "prom_stats":  prom_stats,
-        }
+    # Analyze CE / EE / B2B in parallel
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futures = {}
+        for edition in ["ce", "ee", "b2b"]:
+            cr = check_map.get(f"Functional Tests {edition.upper()}")
+            if not cr:
+                result["editions"][edition] = {"status": "not_run", "failures": [], "report_url": None}
+            else:
+                futures[ex.submit(_analyze_edition, edition, cr, pr_number, allure_attempts)] = edition
+        for fut in as_completed(futures):
+            edition, ed_data = fut.result()
+            result["editions"][edition] = ed_data
 
     # Semantic Version Checker
     cr = check_map.get("Semantic Version Checker")
@@ -826,8 +832,8 @@ def main():
                         help="Manually specify PR numbers (skips Slack)")
     parser.add_argument("--jira-token", default=os.getenv("JIRA_TOKEN", ""),
                         help="Jira personal access token for ticket lookup (or set JIRA_TOKEN env var)")
-    parser.add_argument("--allure-attempts", type=int, default=4,
-                        help="Max retry attempts for Allure data (default 4 = ~2 min; use 15 for ~7 min)")
+    parser.add_argument("--allure-attempts", type=int, default=2,
+                        help="Max retry attempts for Allure data (default 2 = ~10s; increase if data not ready)")
     args = parser.parse_args()
 
     print(f"\n🐛 QueuePilot — {args.branch}\n")
