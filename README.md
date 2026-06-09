@@ -1,12 +1,20 @@
 # QueuePilot
 
-Evidence-based triage of Magento functional test failures (CE / EE / B2B / SVC) for PRs in the `2.4-develop` queue. Runs as a real-time Slack watcher — as soon as `@qmbot` posts a PR list, QueuePilot posts the failure dashboard back to the channel automatically.
+Evidence-based triage of Magento functional test failures (CE / EE / B2B / SVC) for PRs in the `2.4-develop` queue.
+
+---
+
+## How it works
+
+1. You send `@qmbot dq 2.4-develop` in `#pr-queue-dashboard`
+2. Once qmbot replies with the PR list, run `/queuepilot 2.4-develop` in Claude Code
+3. QueuePilot reads qmbot's response, analyzes all PRs, generates an HTML dashboard, and posts the summary back to `#pr-queue-dashboard`
 
 ---
 
 ## Team Setup
 
-Follow these steps once on each machine where you want to use QueuePilot.
+Follow these steps once on each machine.
 
 ### 1. Prerequisites
 
@@ -57,7 +65,6 @@ cat > .claude/settings.local.json << 'EOF'
 {
   "permissions": {
     "allow": [
-      "mcp__claude_ai_Slack__slack_send_message",
       "mcp__claude_ai_Slack__slack_read_channel",
       "Bash"
     ]
@@ -69,107 +76,31 @@ cat > .claude/settings.local.json << 'EOF'
 EOF
 ```
 
-### 7. Start the real-time watcher (recommended)
+---
 
-The watcher polls `#pr-queue-dashboard` every 60 seconds. When `@qmbot` posts a PR list, it immediately runs QueuePilot and posts the dashboard back to Slack — no manual trigger needed.
+## Usage
 
-```bash
-# Copy and load the LaunchAgent (runs at login, restarts automatically)
-cp launchagent/com.queuepilot.watcher.plist ~/Library/LaunchAgents/
-```
-
-Edit `~/Library/LaunchAgents/com.queuepilot.watcher.plist` and fill in your `SLACK_TOKEN` and `JIRA_TOKEN`, then:
-
-```bash
-launchctl load ~/Library/LaunchAgents/com.queuepilot.watcher.plist
-```
-
-Check it's running:
-```bash
-tail -f watcher.log
-```
-
-Stop it:
-```bash
-launchctl unload ~/Library/LaunchAgents/com.queuepilot.watcher.plist
-```
-
-### 8. Run it manually (Claude Code slash command)
-
-```bash
-cd /path/to/queuepilot
-claude
-```
-
-Then type:
+### Via Claude Code slash command (recommended)
 
 ```
 /queuepilot 2.4-develop
 ```
 
-Claude will post to Slack, fetch all PR failures, generate an HTML dashboard, open it in your browser, and post the full summary to `#pr-queue-dashboard` so the whole team sees it instantly.
+Make sure you've already sent `@qmbot dq 2.4-develop` in the channel and qmbot has replied before running this.
 
----
-
-## What it does
-
-1. **Watches** `#pr-queue-dashboard` for `@qmbot` responses (real-time watcher) **or** posts `@qmbot dq <branch>` and reads the reply (slash command)
-2. Fetches GitHub check-run results for every PR in parallel (up to 5 at once)
-3. Extracts failing test names from Allure reports (CE / EE / B2B) with up to 8 retries
-4. Looks up ACQE Jira tickets for each failing test by name
-5. Checks Semantic Version Checker status
-6. Generates a self-contained **HTML dashboard** and opens it in your browser
-7. Saves the report to `reports/` **and** `~/Downloads/`
-8. Posts a formatted summary to `#pr-queue-dashboard` with per-PR failures and Jira ticket links
-
----
-
-## How the watcher works
-
-```
-watch.py (runs in background via LaunchAgent)
-    │
-    ├── Every 60 seconds: poll #pr-queue-dashboard
-    │
-    ├── New qmbot message with PRs? → run queuepilot.py --prs <n> ...
-    │                                       │
-    │                                       ├── Fetch GitHub check-runs
-    │                                       ├── Download Allure test data
-    │                                       ├── Look up Jira tickets
-    │                                       ├── Generate HTML report
-    │                                       └── Post summary to Slack ✅
-    │
-    └── No new message or already processed? → skip
-```
-
----
-
-## Usage without Claude Code
-
-### Pass PR numbers directly (no Slack needed)
-
-```bash
-python3 queuepilot.py 2.4-develop --prs 10737 10740 10741
-```
-
-### With Jira ticket lookup
-
-```bash
-python3 queuepilot.py 2.4-develop --prs 10737 --jira-token <token>
-```
-
-### Full auto flow via Slack (requires SLACK_TOKEN)
+### Direct CLI
 
 ```bash
 export SLACK_TOKEN=xoxb-your-token-here
+
+# Read qmbot's latest response and generate report
 python3 queuepilot.py 2.4-develop
-```
 
-### Read-only mode (Slack message already sent)
+# Pass PR numbers directly (no Slack required)
+python3 queuepilot.py 2.4-develop --prs 10737 10740 10741
 
-```bash
-export SLACK_TOKEN=xoxb-your-token-here
-python3 queuepilot.py 2.4-develop --read-only
+# With Jira ticket lookup
+python3 queuepilot.py 2.4-develop --jira-token <token>
 ```
 
 ---
@@ -185,19 +116,19 @@ positional:
 options:
   --channel ID        Slack channel ID        (default: C0B400Y1ZU2)
   --bot ID            Slack bot user ID       (default: W015DAXESG0)
-  --cmd CMD           Bot command             (default: dq)
   --repo OWNER/REPO   GitHub repo             (default: magento-commerce/magento2ce)
   --output FILE       Output HTML path        (default: reports/queuepilot-{branch}-{date}-{n}.html)
-  --read-only         Read latest qmbot response, don't post
+  --no-slack          Skip posting results to Slack
   --prs N [N ...]     Skip Slack, use these PR numbers directly
   --jira-token TOKEN  Jira personal access token for ticket lookup
+  --allure-attempts N Max retries for Allure data (default: 4, ~2 min)
 ```
 
 ## Environment variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SLACK_TOKEN` | Slack bot token (`xoxb-...`) — enables Slack mode and auto-posting | required for Slack mode |
+| `SLACK_TOKEN` | Slack bot token (`xoxb-...`) — reads qmbot response and posts results | required unless `--prs` |
 | `JIRA_TOKEN` | Jira personal access token — enables ticket lookup | optional |
 | `SLACK_CHANNEL` | Override default channel ID | `C0B400Y1ZU2` |
 | `SLACK_BOT_ID` | Override default bot user ID | `W015DAXESG0` |

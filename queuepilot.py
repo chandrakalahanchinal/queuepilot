@@ -3,12 +3,14 @@
 QueuePilot — Evidence-based triage of Magento functional test failures in PR queues.
 
 Usage:
+    # 1. Send "@qmbot dq 2.4-develop" in #pr-queue-dashboard manually
+    # 2. Once qmbot replies, run:
     python queuepilot.py 2.4-develop
-    python queuepilot.py 2.4-develop --channel C2MG0TNPL --bot W015DAXESG0
     python queuepilot.py 2.4-develop --output report.html
+    python queuepilot.py 2.4-develop --prs 10737 10740   # skip Slack, use PRs directly
 
 Environment variables:
-    SLACK_TOKEN   Slack API token (required)
+    SLACK_TOKEN   Slack API token (required unless --prs is used)
     GITHUB_REPO   GitHub repo slug (default: magento-commerce/magento2ce)
 """
 
@@ -31,10 +33,8 @@ import requests
 # ──────────────────────────────────────────────────────────────────────────────
 DEFAULT_CHANNEL    = "C0B400Y1ZU2"  # #pr-queue-dashboard
 DEFAULT_BOT_ID     = "W015DAXESG0"  # qmbot
-DEFAULT_BOT_CMD    = "dq"
 DEFAULT_REPO       = "magento-commerce/magento2ce"
 DEFAULT_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
-BOT_WAIT_TIMEOUT   = 90   # seconds to wait for bot reply
 ALLURE_WORKER_MAX  = 10   # parallel workers per PR for test-case fetches
 PR_WORKER_MAX      = 5    # parallel PR analyses
 JIRA_BASE          = "https://jira.corp.adobe.com"
@@ -44,30 +44,6 @@ JIRA_PROJECT       = "ACQE"
 # ──────────────────────────────────────────────────────────────────────────────
 # Slack
 # ──────────────────────────────────────────────────────────────────────────────
-def slack_join_channel(token: str, channel: str) -> None:
-    resp = requests.post(
-        "https://slack.com/api/conversations.join",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"channel": channel},
-        timeout=15,
-    )
-    resp.raise_for_status()
-
-
-def slack_post(token: str, channel: str, text: str) -> dict:
-    resp = requests.post(
-        "https://slack.com/api/chat.postMessage",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"channel": channel, "text": text},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    if not data.get("ok"):
-        raise RuntimeError(f"Slack postMessage error: {data.get('error')}")
-    return data
-
-
 def slack_history(token: str, channel: str, oldest: str, limit: int = 30) -> list:
     resp = requests.get(
         "https://slack.com/api/conversations.history",
@@ -80,24 +56,6 @@ def slack_history(token: str, channel: str, oldest: str, limit: int = 30) -> lis
     if not data.get("ok"):
         raise RuntimeError(f"Slack history error: {data.get('error')}")
     return data.get("messages", [])
-
-
-def wait_for_bot_reply(token: str, channel: str, bot_id: str, after_ts: str,
-                       timeout: int = BOT_WAIT_TIMEOUT) -> Optional[str]:
-    print(f"  Waiting for bot reply (up to {timeout}s)...", flush=True)
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        msgs = slack_history(token, channel, oldest=after_ts)
-        for msg in reversed(msgs):
-            if msg.get("user") == bot_id and msg.get("ts") != after_ts:
-                return msg.get("text", "")
-        time.sleep(3)
-    return None
-
-
-def parse_pr_numbers(bot_text: str) -> list[int]:
-    # Legacy: used only for --prs manual mode (single repo)
-    return [int(m) for m in re.findall(r"magento2ce[^\|]+?#(\d+)", bot_text)]
 
 
 def parse_pr_list(bot_text: str) -> list[dict]:
@@ -859,17 +817,13 @@ def main():
                         help="Slack channel ID")
     parser.add_argument("--bot",      default=os.getenv("SLACK_BOT_ID", DEFAULT_BOT_ID),
                         help="Slack bot user ID")
-    parser.add_argument("--cmd",      default=os.getenv("SLACK_BOT_CMD", DEFAULT_BOT_CMD),
-                        help="Bot command to send (default: dq)")
     parser.add_argument("--repo",     default=os.getenv("GITHUB_REPO", DEFAULT_REPO),
                         help="GitHub repo slug")
     parser.add_argument("--output",   default=None, help="Output HTML file path (default: timestamped file in project dir)")
     parser.add_argument("--no-slack", action="store_true",
-                        help="Skip Slack; pass PR numbers directly via --prs")
+                        help="Skip posting results to Slack")
     parser.add_argument("--prs",      nargs="+", type=int,
                         help="Manually specify PR numbers (skips Slack)")
-    parser.add_argument("--read-only", action="store_true",
-                        help="Don't post to Slack; just read the latest qmbot response from the channel")
     parser.add_argument("--jira-token", default=os.getenv("JIRA_TOKEN", ""),
                         help="Jira personal access token for ticket lookup (or set JIRA_TOKEN env var)")
     parser.add_argument("--allure-attempts", type=int, default=4,
@@ -894,38 +848,15 @@ def main():
             print("ERROR: SLACK_TOKEN env var is required (or use --prs to skip Slack).")
             sys.exit(1)
 
-        if args.read_only:
-            print(f"1. Reading latest qmbot response from #{args.channel}...")
-            msgs = slack_history(token, args.channel, oldest="0", limit=50)
-            bot_text = None
-            for msg in msgs:
-                if msg.get("user") == args.bot:
-                    bot_text = msg.get("text", "")
-                    break
-            if not bot_text:
-                print("ERROR: No recent qmbot message found in channel.")
-                sys.exit(1)
-        else:
-            print(f"1. Sending @qmbot {args.cmd} {args.branch} to #{args.channel}...")
-            try:
-                slack_join_channel(token, args.channel)
-            except Exception:
-                pass
-            try:
-                msg_data = slack_post(token, args.channel, f"<@{args.bot}> {args.cmd} {args.branch}")
-            except RuntimeError as e:
-                if "channel_not_found" in str(e) or "not_in_channel" in str(e):
-                    print("\nERROR: Bot is not a member of this channel.")
-                    print("Fix: Open the channel in Slack and run:")
-                    print(f"  /invite @slack_connector")
-                    print(f"  /invite @qmbot")
-                    print("\nThen re-run queuepilot.")
-                    sys.exit(1)
-                raise
-            sent_ts = msg_data["ts"]
-            bot_text = wait_for_bot_reply(token, args.channel, args.bot, sent_ts)
+        print(f"1. Reading latest qmbot response from #{args.channel}...")
+        msgs = slack_history(token, args.channel, oldest="0", limit=50)
+        bot_text = None
+        for msg in msgs:
+            if msg.get("user") == args.bot:
+                bot_text = msg.get("text", "")
+                break
         if not bot_text:
-            print("ERROR: Timed out waiting for bot response.")
+            print("ERROR: No recent qmbot message found in channel. Send '@qmbot dq <branch>' in Slack first.")
             sys.exit(1)
 
         # Parse repo + PR number from GitHub URLs in qmbot's response
