@@ -1,89 +1,84 @@
 # QueuePilot
 
-Evidence-based triage of Magento functional test failures (CE / EE / B2B / SVC) for PRs in the `2.4-develop` queue.
-
----
+Automatic triage of Magento functional test failures (CE / EE / B2B / SVC) for PRs in the `2.4-develop` queue.
 
 ## How it works
 
-1. Start the watcher once (keeps running in the background)
-2. Send `@qmbot dq 2.4-develop` in `#pr-queue-dashboard`
-3. qmbot replies with the PR list → watcher automatically runs the analysis and posts the report to the channel
+1. Send `@qmbot dq 2.4-develop` in `#pr-queue-dashboard`
+2. qmbot replies with the PR list
+3. QueuePilot automatically generates the failure report and posts it to the channel
 
-That's it. No other commands needed.
+No other steps. The watcher runs in the background and handles everything.
 
 ---
 
-## Team Setup
+## Setup (do this once per machine)
 
-### 1. Prerequisites
+### Prerequisites
 
-| Tool | Install | Verify |
-|------|---------|--------|
-| Python 3.10+ | [python.org](https://www.python.org/downloads/) | `python3 --version` |
-| GitHub CLI | `brew install gh` | `gh --version` |
+| Tool | Install |
+|------|---------|
+| Python 3.10+ | [python.org](https://www.python.org/downloads/) — verify: `python3 --version` |
+| GitHub CLI | `brew install gh` — verify: `gh --version` |
 
-### 2. Clone and install
+### 1. Clone the repo
 
 ```bash
 git clone https://github.com/chandrakalahanchinal/queuepilot.git
 cd queuepilot
-pip install -r requirements.txt
 ```
 
-### 3. Authenticate GitHub CLI
+### 2. Run setup
 
 ```bash
-gh auth login
-# Select: GitHub.com → HTTPS → Login with a web browser
+bash setup.sh
 ```
 
-### 4. Set your tokens
+The script will:
+- Install Python dependencies
+- Authenticate GitHub CLI (if not already done)
+- Ask for your `SLACK_TOKEN` and optionally `JIRA_TOKEN`
+- Install and start the background watcher automatically
+- Configure it to **start at every login** — you never need to run it again
 
-```bash
-export SLACK_TOKEN=xoxb-your-token-here
-export JIRA_TOKEN=your-jira-token   # optional, enables Jira ticket links
-```
-
-Add these to your shell profile (`~/.zshrc` or `~/.bash_profile`) to make them permanent.
-
-### 5. Start the watcher
-
-```bash
-python3 watch.py
-```
-
-Keep this terminal open (or run it in the background). The watcher polls `#pr-queue-dashboard` every 30 seconds.
+That's it. After setup, just send the Slack message and the report appears.
 
 ---
 
-## Usage
+## Tokens
 
-Once the watcher is running, just send the command in Slack:
-
-```
-@qmbot dq 2.4-develop
-```
-
-After qmbot replies with the PR list, QueuePilot will automatically:
-- Fetch GitHub check-run results for every PR
-- Extract failing test names from Allure reports (CE / EE / B2B) in parallel
-- Look up ACQE Jira tickets for each failing test
-- Generate an HTML dashboard saved to `reports/` and `~/Downloads/`
-- Post the formatted summary to `#pr-queue-dashboard`
+| Token | Where to get it | Required? |
+|-------|----------------|-----------|
+| `SLACK_TOKEN` | Slack app settings → OAuth tokens → Bot token (`xoxb-...`) | Yes |
+| `JIRA_TOKEN` | Jira → Profile → Personal Access Tokens | No (enables Jira ticket links in report) |
 
 ---
 
-## Manual run (optional)
+## Useful commands
 
-If the watcher isn't running, you can trigger the report manually after qmbot has already replied:
+```bash
+# Check watcher logs
+tail -f watcher.log
+
+# Stop the watcher
+launchctl unload ~/Library/LaunchAgents/com.queuepilot.watcher.plist
+
+# Start the watcher again (or re-run setup to update tokens)
+bash setup.sh
+```
+
+---
+
+## Manual trigger (optional)
+
+If you want to run the report manually without the watcher:
 
 ```bash
 export SLACK_TOKEN=xoxb-your-token-here
 python3 queuepilot.py 2.4-develop
 ```
 
-Or pass PR numbers directly (no Slack needed):
+Or skip Slack and pass PR numbers directly:
 
 ```bash
 python3 queuepilot.py 2.4-develop --prs 10737 10740 10741
@@ -91,46 +86,29 @@ python3 queuepilot.py 2.4-develop --prs 10737 10740 10741
 
 ---
 
-## All options
+## Report contents
+
+Each run posts a formatted Slack message to `#pr-queue-dashboard` and saves an HTML dashboard to `reports/` and `~/Downloads/`.
+
+The HTML report includes:
+1. **Stats** — PR count and unique failing test count
+2. **Queue summary** — all PRs with CE / EE / B2B / SVC status badges
+3. **All Failing Tests** — deduplicated list sorted by failure frequency, with Jira ticket links
+4. **Per-PR details** — CE | EE | B2B columns with full test names, Jira badges, Allure and Jenkins links
+
+---
+
+## All CLI options
 
 ```
 python3 queuepilot.py <branch> [options]
 
-positional:
-  branch              Queue branch name, e.g. 2.4-develop
-
-options:
   --channel ID        Slack channel ID        (default: C0B400Y1ZU2)
   --bot ID            Slack bot user ID       (default: W015DAXESG0)
   --repo OWNER/REPO   GitHub repo             (default: magento-commerce/magento2ce)
-  --output FILE       Output HTML path        (default: reports/queuepilot-{branch}-{date}-{n}.html)
-  --no-slack          Skip posting results to Slack
-  --prs N [N ...]     Skip Slack, use these PR numbers directly
-  --jira-token TOKEN  Jira personal access token for ticket lookup
-  --allure-attempts N Max retries for Allure data (default: 2, ~10s)
+  --output FILE       HTML output path        (default: auto-timestamped)
+  --no-slack          Skip posting to Slack
+  --prs N [N ...]     Use these PR numbers instead of reading from Slack
+  --jira-token TOKEN  Jira PAT for ticket lookup
+  --allure-attempts N Allure retry count      (default: 2)
 ```
-
-## Environment variables
-
-| Variable | Description |
-|----------|-------------|
-| `SLACK_TOKEN` | Slack bot token (`xoxb-...`) — required |
-| `JIRA_TOKEN` | Jira personal access token — optional, enables ticket lookup |
-| `SLACK_CHANNEL` | Override default channel ID (`C0B400Y1ZU2`) |
-| `SLACK_BOT_ID` | Override default bot user ID (`W015DAXESG0`) |
-| `GITHUB_REPO` | Override GitHub repo slug (`magento-commerce/magento2ce`) |
-
----
-
-## Dashboard sections
-
-Each HTML report contains:
-
-1. **Stats bar** — PR count and unique failing test count
-2. **Queue summary table** — all PRs with CE / EE / B2B / SVC badges
-3. **All Failing Tests table** — deduplicated, sorted by fail frequency, with Jira links
-4. **Per-PR failure cards** — CE | EE | B2B columns with test names, Jira badges, Allure/Jenkins links
-
-Reports are saved to:
-- `reports/queuepilot-2.4-develop-YYYY-MM-DD-N.html`
-- `~/Downloads/queuepilot-2.4-develop-YYYY-MM-DD-N.html`
