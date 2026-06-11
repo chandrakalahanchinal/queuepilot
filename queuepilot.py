@@ -126,9 +126,10 @@ def slack_post_dashboard(token: str, channel: str, branch: str,
                 if ticket and ticket.get("status") != "Cancelled" and f["method"] not in jira_by_method:
                     jira_by_method[f["method"]] = ticket
 
+    total_failures = sum(counts.values())
     header = (
         f"*🐛 QueuePilot — `{branch}`*\n"
-        f"*{len(prs)} PR(s)* in queue  ·  *{len(counts)} unique failing test(s)*"
+        f"*{len(prs)} PR(s)* in queue  ·  *{len(counts)} unique failing test(s)*  ·  *{total_failures} total fail(s)*"
     )
     if permalink:
         header += f"\n📊 <{permalink}|Open Full Dashboard>"
