@@ -116,34 +116,36 @@ def slack_post_dashboard(token: str, channel: str, branch: str,
                          prs: list[dict], permalink: Optional[str]) -> None:
     """Post a formatted QueuePilot summary to Slack."""
     from collections import Counter
+    # Count per PR (deduplicated across editions within the same PR)
     counts: Counter = Counter()
     jira_by_method: dict = {}
     for pr in prs:
+        methods_in_pr: set = set()
         for ed_key in ["ce", "ee", "b2b"]:
             for f in pr["editions"].get(ed_key, {}).get("failures", []):
-                counts[f["method"]] += 1
+                methods_in_pr.add(f["method"])
                 ticket = f.get("jira")
                 if ticket and ticket.get("status") != "Cancelled" and f["method"] not in jira_by_method:
                     jira_by_method[f["method"]] = ticket
+        for method in methods_in_pr:
+            counts[method] += 1
 
-    total_failures = sum(counts.values())
     header = (
         f"*🐛 QueuePilot — `{branch}`*\n"
-        f"*{len(prs)} PR(s)* in queue  ·  *{len(counts)} unique failing test(s)*  ·  *{total_failures} total fail(s)*"
+        f"*{len(prs)} PR(s)* in queue  ·  *{len(counts)} unique failing test(s)*"
     )
     if permalink:
         header += f"\n📊 <{permalink}|Open Full Dashboard>"
 
     blocks: list[dict] = [{"type": "section", "text": {"type": "mrkdwn", "text": header}}]
 
-    # Unique failures summary — sorted by count descending
+    # Unique failures — sorted by PR count descending, with count and Jira ticket
     if counts:
         lines = []
         for method, count in counts.most_common():
-            count_str = f" ×{count}" if count > 1 else ""
             ticket = jira_by_method.get(method)
             jira_str = f"  → <{ticket['url']}|{ticket['key']}> _{ticket['status']}_" if ticket else ""
-            lines.append(f"• `{method}`{count_str}{jira_str}")
+            lines.append(f"• `{method}`  *{count} PR(s)*{jira_str}")
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
         blocks.append({"type": "divider"})
 
@@ -637,12 +639,15 @@ def render_all_failures_table(prs: list[dict]) -> str:
     counts: Counter = Counter()
     jira_by_method: dict = {}
     for pr in prs:
+        methods_in_pr: set = set()
         for edition in ["ce", "ee", "b2b"]:
             for f in pr["editions"].get(edition, {}).get("failures", []):
-                counts[f["method"]] += 1
+                methods_in_pr.add(f["method"])
                 ticket = f.get("jira")
                 if ticket and ticket.get("status") != "Cancelled" and f["method"] not in jira_by_method:
                     jira_by_method[f["method"]] = ticket
+        for method in methods_in_pr:
+            counts[method] += 1
     if not counts:
         return '<p class="muted">No test failures recorded.</p>'
     rows = ""
