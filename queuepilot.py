@@ -115,20 +115,36 @@ def slack_upload_html(token: str, channel: str, filepath: str, filename: str) ->
 def slack_post_dashboard(token: str, channel: str, branch: str,
                          prs: list[dict], permalink: Optional[str]) -> None:
     """Post a formatted QueuePilot summary to Slack."""
-    unique_tests = {
-        f["method"]
-        for pr in prs for ed in ["ce", "ee", "b2b"]
-        for f in pr["editions"].get(ed, {}).get("failures", [])
-    }
+    from collections import Counter
+    counts: Counter = Counter()
+    jira_by_method: dict = {}
+    for pr in prs:
+        for ed_key in ["ce", "ee", "b2b"]:
+            for f in pr["editions"].get(ed_key, {}).get("failures", []):
+                counts[f["method"]] += 1
+                ticket = f.get("jira")
+                if ticket and ticket.get("status") != "Cancelled" and f["method"] not in jira_by_method:
+                    jira_by_method[f["method"]] = ticket
 
     header = (
         f"*🐛 QueuePilot — `{branch}`*\n"
-        f"*{len(prs)} PR(s)* in queue  ·  *{len(unique_tests)} unique failing test(s)*"
+        f"*{len(prs)} PR(s)* in queue  ·  *{len(counts)} unique failing test(s)*"
     )
     if permalink:
         header += f"\n📊 <{permalink}|Open Full Dashboard>"
 
     blocks: list[dict] = [{"type": "section", "text": {"type": "mrkdwn", "text": header}}]
+
+    # Unique failures summary — sorted by count descending
+    if counts:
+        lines = []
+        for method, count in counts.most_common():
+            count_str = f" ×{count}" if count > 1 else ""
+            ticket = jira_by_method.get(method)
+            jira_str = f"  → <{ticket['url']}|{ticket['key']}> _{ticket['status']}_" if ticket else ""
+            lines.append(f"• `{method}`{count_str}{jira_str}")
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+        blocks.append({"type": "divider"})
 
     for pr in prs:
         def _badge(ed_key: str) -> str:
@@ -146,19 +162,16 @@ def slack_post_dashboard(token: str, channel: str, branch: str,
             f"CE: {_badge('ce')}  EE: {_badge('ee')}  B2B: {_badge('b2b')}"
         )
 
-        # Collect unique failing tests with Jira links
-        seen: dict[str, dict] = {}
+        # Per-PR failures — test names only, no Jira
+        seen: set = set()
+        pr_lines = []
         for ed_key in ["ce", "ee", "b2b"]:
             for f in pr["editions"].get(ed_key, {}).get("failures", []):
                 if f["method"] not in seen:
-                    seen[f["method"]] = f
-        if seen:
-            lines = []
-            for f in sorted(seen.values(), key=lambda x: x["method"]):
-                j = f.get("jira")
-                ticket = f"  → <{j['url']}|{j['key']}> _{j['status']}_" if j else ""
-                lines.append(f"  • `{f['method']}`{ticket}")
-            pr_text += "\n" + "\n".join(lines)
+                    seen.add(f["method"])
+                    pr_lines.append(f"  • `{f['method']}`")
+        if pr_lines:
+            pr_text += "\n" + "\n".join(sorted(pr_lines))
 
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": pr_text}})
         blocks.append({"type": "divider"})
