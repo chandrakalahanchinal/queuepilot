@@ -67,6 +67,8 @@ cat > "$PLIST_PATH" <<PLIST
         <string>$SLACK_TOKEN</string>
         <key>JIRA_TOKEN</key>
         <string>$JIRA_TOKEN</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
 
     <key>WorkingDirectory</key>

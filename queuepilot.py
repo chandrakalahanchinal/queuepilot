@@ -3,15 +3,19 @@
 QueuePilot — Evidence-based triage of Magento functional test failures in PR queues.
 
 Usage:
-    # 1. Send "@qmbot dq 2.4-develop" in #pr-queue-dashboard manually
+    # 1. Send "@qmbot dq 2.4-develop" in #pr-queue-dashboard
     # 2. Once qmbot replies, run:
     python queuepilot.py 2.4-develop
     python queuepilot.py 2.4-develop --output report.html
-    python queuepilot.py 2.4-develop --prs 10737 10740   # skip Slack, use PRs directly
+    python queuepilot.py 2.4-develop --prs 10737 10740   # analyse specific PRs (no Slack read)
+
+Slack access is locked to #pr-queue-dashboard (C0B400Y1ZU2). This tool:
+  - reads only that channel to find qmbot's PR list
+  - posts only to that channel (new message + HTML upload)
+  - never modifies or deletes existing messages
 
 Environment variables:
     SLACK_TOKEN   Slack API token (required unless --prs is used)
-    GITHUB_REPO   GitHub repo slug (default: magento-commerce/magento2ce)
 """
 
 import argparse
@@ -352,9 +356,11 @@ def search_jira_for_test(method: str, token: str) -> Optional[dict]:
         issues = r.json().get("issues", [])
         if not issues:
             return None
-        # Prefer tickets that are not Done or Cancelled
+        # Only return a ticket if an active (non-Done, non-Cancelled) one exists
         active = [i for i in issues if i["fields"]["status"]["name"] not in ("Done", "Cancelled")]
-        pick = active[0] if active else issues[0]
+        if not active:
+            return None
+        pick = active[0]
         return {
             "key":    pick["key"],
             "status": pick["fields"]["status"]["name"],
@@ -516,15 +522,6 @@ def failure_count_badge(edition_data: dict) -> str:
     return f'<span class="badge fail">{n} FAIL</span>'
 
 
-def jira_badge(ticket: Optional[dict]) -> str:
-    if not ticket:
-        return ""
-    status = html.escape(ticket["status"])
-    url    = html.escape(ticket["url"])
-    key    = html.escape(ticket["key"])
-    cls    = "jira-open" if ticket["status"] not in ("Done", "Cancelled") else "jira-done"
-    return f' <a href="{url}" target="_blank" class="jira-badge {cls}">{key} · {status}</a>'
-
 
 def render_failures_table(failures: list[dict], report_url: Optional[str]) -> str:
     if not failures:
@@ -533,7 +530,7 @@ def render_failures_table(failures: list[dict], report_url: Optional[str]) -> st
     for f in failures:
         method = html.escape(f["method"])
         status_cls = "broken" if f["status"] == "broken" else "failed"
-        rows += f'<tr><td><code class="{status_cls}">{method}</code>{jira_badge(f.get("jira"))}</td></tr>'
+        rows += f'<tr><td><code class="{status_cls}">{method}</code></td></tr>'
     report_link = f'<a href="{html.escape(report_url)}" target="_blank">Open Allure Report ↗</a>' if report_url else ""
     return f"""
     <table class="failures">
@@ -629,22 +626,36 @@ def render_all_failures_table(prs: list[dict]) -> str:
         for edition in ["ce", "ee", "b2b"]:
             for f in pr["editions"].get(edition, {}).get("failures", []):
                 counts[f["method"]] += 1
-                if f.get("jira") and f["method"] not in jira_by_method:
-                    jira_by_method[f["method"]] = f["jira"]
+                ticket = f.get("jira")
+                if ticket and ticket.get("status") != "Cancelled" and f["method"] not in jira_by_method:
+                    jira_by_method[f["method"]] = ticket
     if not counts:
         return '<p class="muted">No test failures recorded.</p>'
     rows = ""
     for method, count in counts.most_common():
-        ticket_html = jira_badge(jira_by_method.get(method))
+        ticket = jira_by_method.get(method)
+        if ticket:
+            url    = html.escape(ticket["url"])
+            key    = html.escape(ticket["key"])
+            status = html.escape(ticket["status"])
+            cls    = "jira-open" if ticket["status"] not in ("Done", "Cancelled") else "jira-done"
+            jira_td = f'<td><a href="{url}" target="_blank" class="jira-badge {cls}">{key} · {status}</a></td>'
+        else:
+            jira_td = "<td></td>"
         rows += f"""
       <tr>
-        <td><code class="failed">{html.escape(method)}</code>{ticket_html}</td>
+        <td><code class="failed">{html.escape(method)}</code></td>
         <td style="text-align:center;white-space:nowrap"><span class="badge fail">{count}</span></td>
+        {jira_td}
       </tr>"""
     return f"""
   <table class="summary">
     <thead>
-      <tr><th>Test</th><th style="width:80px;text-align:center">Fail Count</th></tr>
+      <tr>
+        <th>Test</th>
+        <th style="width:90px;text-align:center">PR Count</th>
+        <th style="width:200px">Jira Ticket</th>
+      </tr>
     </thead>
     <tbody>{rows}</tbody>
   </table>"""
@@ -793,13 +804,13 @@ def render_html(branch: str, prs: list[dict], generated_at: str) -> str:
     </div>
 
     <div class="summary-section">
-      <h2>Queue Summary</h2>
-      {summary_table}
+      <h2>All Failing Tests</h2>
+      {all_fails_table}
     </div>
 
     <div class="summary-section" style="margin-top:28px">
-      <h2>All Failing Tests</h2>
-      {all_fails_table}
+      <h2>Queue Summary</h2>
+      {summary_table}
     </div>
 
     <div class="pr-section">
@@ -819,17 +830,11 @@ def render_html(branch: str, prs: list[dict], generated_at: str) -> str:
 def main():
     parser = argparse.ArgumentParser(description="QueuePilot — Magento PR test failure analyzer")
     parser.add_argument("branch", help="Branch/queue name, e.g. 2.4-develop")
-    parser.add_argument("--channel",  default=os.getenv("SLACK_CHANNEL", DEFAULT_CHANNEL),
-                        help="Slack channel ID")
-    parser.add_argument("--bot",      default=os.getenv("SLACK_BOT_ID", DEFAULT_BOT_ID),
-                        help="Slack bot user ID")
-    parser.add_argument("--repo",     default=os.getenv("GITHUB_REPO", DEFAULT_REPO),
-                        help="GitHub repo slug")
     parser.add_argument("--output",   default=None, help="Output HTML file path (default: timestamped file in project dir)")
     parser.add_argument("--no-slack", action="store_true",
                         help="Skip posting results to Slack")
     parser.add_argument("--prs",      nargs="+", type=int,
-                        help="Manually specify PR numbers (skips Slack)")
+                        help="Manually specify PR numbers (reads from Slack queue if omitted)")
     parser.add_argument("--jira-token", default=os.getenv("JIRA_TOKEN", ""),
                         help="Jira personal access token for ticket lookup (or set JIRA_TOKEN env var)")
     parser.add_argument("--allure-attempts", type=int, default=2,
@@ -846,7 +851,7 @@ def main():
 
     if args.prs:
         # Manual mode — use --repo as default for all specified PRs
-        pr_queue = [{"repo": args.repo, "pr_number": n} for n in args.prs]
+        pr_queue = [{"repo": DEFAULT_REPO, "pr_number": n} for n in args.prs]
         print(f"Using provided PRs: {[p['pr_number'] for p in pr_queue]}")
     else:
         token = os.getenv("SLACK_TOKEN")
@@ -854,11 +859,11 @@ def main():
             print("ERROR: SLACK_TOKEN env var is required (or use --prs to skip Slack).")
             sys.exit(1)
 
-        print(f"1. Reading latest qmbot response from #{args.channel}...")
-        msgs = slack_history(token, args.channel, oldest="0", limit=50)
+        print(f"1. Reading latest qmbot response from #pr-queue-dashboard...")
+        msgs = slack_history(token, DEFAULT_CHANNEL, oldest="0", limit=50)
         bot_text = None
         for msg in msgs:
-            if msg.get("user") == args.bot:
+            if msg.get("user") == DEFAULT_BOT_ID:
                 bot_text = msg.get("text", "")
                 break
         if not bot_text:
@@ -931,14 +936,14 @@ def main():
     if slack_token and not args.no_slack:
         print("5. Posting dashboard to Slack...", flush=True)
         permalink = slack_upload_html(
-            slack_token, args.channel,
+            slack_token, DEFAULT_CHANNEL,
             output_path, os.path.basename(output_path),
         )
         if permalink:
             print(f"   Dashboard uploaded: {permalink}", flush=True)
         else:
             print("   ⚠ File upload failed (token may lack files:write scope) — posting summary only.", flush=True)
-        slack_post_dashboard(slack_token, args.channel, args.branch, pr_results, permalink)
+        slack_post_dashboard(slack_token, DEFAULT_CHANNEL, args.branch, pr_results, permalink)
 
 
 if __name__ == "__main__":
