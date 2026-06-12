@@ -966,21 +966,10 @@ def main():
         print("5. Posting dashboard to Slack...", flush=True)
         # If triggered from watcher, reply into qmbot's thread; otherwise post top-level
         reply_ts = args.reply_to_ts or None
-        msg_ts = slack_post_dashboard(
+        slack_post_dashboard(
             slack_token, DEFAULT_CHANNEL, args.branch, pr_results, None,
             thread_ts=reply_ts,
         )
-        # Upload HTML as a reply to the summary message (or qmbot thread if reply_ts given)
-        upload_thread = reply_ts or msg_ts
-        permalink = slack_upload_html(
-            slack_token, DEFAULT_CHANNEL,
-            output_path, os.path.basename(output_path),
-            thread_ts=upload_thread,
-        )
-        if permalink:
-            print(f"   Dashboard uploaded as thread reply: {permalink}", flush=True)
-        else:
-            print("   ⚠ File upload failed (token may lack files:write scope).", flush=True)
 
 
 if __name__ == "__main__":
