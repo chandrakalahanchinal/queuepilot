@@ -116,19 +116,16 @@ def slack_post_dashboard(token: str, channel: str, branch: str,
                          prs: list[dict], permalink: Optional[str]) -> None:
     """Post a formatted QueuePilot summary to Slack."""
     from collections import Counter
-    # Count per PR (deduplicated across editions within the same PR)
+    # Count total occurrences across all PRs and all editions
     counts: Counter = Counter()
     jira_by_method: dict = {}
     for pr in prs:
-        methods_in_pr: set = set()
         for ed_key in ["ce", "ee", "b2b"]:
             for f in pr["editions"].get(ed_key, {}).get("failures", []):
-                methods_in_pr.add(f["method"])
+                counts[f["method"]] += 1
                 ticket = f.get("jira")
                 if ticket and ticket.get("status") != "Cancelled" and f["method"] not in jira_by_method:
                     jira_by_method[f["method"]] = ticket
-        for method in methods_in_pr:
-            counts[method] += 1
 
     header = (
         f"*🐛 QueuePilot — `{branch}`*\n"
@@ -145,7 +142,7 @@ def slack_post_dashboard(token: str, channel: str, branch: str,
         for method, count in counts.most_common():
             ticket = jira_by_method.get(method)
             jira_str = f"  → <{ticket['url']}|{ticket['key']}> _{ticket['status']}_" if ticket else ""
-            lines.append(f"• `{method}`  *{count} PR(s)*{jira_str}")
+            lines.append(f"• `{method}`  *{count}x*{jira_str}")
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
         blocks.append({"type": "divider"})
 
