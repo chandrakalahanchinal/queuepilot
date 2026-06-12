@@ -1,18 +1,93 @@
 # QueuePilot
 
-Automatic triage of Magento functional test failures (CE / EE / B2B / SVC) for PRs in the `2.4-develop` queue.
-
-## How it works
-
-1. Send `@qmbot dq 2.4-develop` in `#pr-queue-dashboard`
-2. qmbot replies with the PR list
-3. QueuePilot automatically generates the failure report and posts it to the channel
-
-No other steps. The watcher runs in the background and handles everything.
+Automatic triage of Magento functional test failures (CE / EE / B2B) for PRs in the `2.4-develop` queue. Zero manual steps — send one Slack message, get a full failure report in the same thread.
 
 ---
 
-## Setup (do this once per machine)
+## How it works
+
+```
+You          →  @qmbot dq 2.4-develop          (Slack: #pr-queue-dashboard)
+qmbot        →  replies with PR list            (Slack thread)
+Watcher      →  detects reply, waits 5 min      (background process on your Mac)
+QueuePilot   →  analyzes all PRs                (GitHub + Allure + Jira)
+Slack Connect bot → posts report in qmbot thread (one reply, no extra messages)
+```
+
+The 5-minute wait lets Jenkins/Allure finish writing test data before QueuePilot reads it.
+
+---
+
+## Full integration flow
+
+### 1. Slack → trigger detection
+
+- Watcher polls `#pr-queue-dashboard` every 30 seconds via `conversations.history`
+- When it sees `dq 2.4-develop` (from any user), it opens a 10-minute window waiting for qmbot to reply
+- When qmbot (`W015DAXESG0`) replies and the message contains GitHub PR URLs, the watcher records qmbot's message `ts` and schedules the report to fire 5 minutes later
+- After the report is posted, the `ts` is cleared and the watcher resets
+
+### 2. GitHub → PR and check-run data
+
+For each PR, QueuePilot calls the GitHub CLI (`gh`) to fetch:
+- PR metadata (title, author, URL) via `gh pr view`
+- All check runs via `gh api repos/{repo}/commits/{sha}/check-runs`
+- It looks for check runs named `ce-`, `ee-`, `b2b-` and reads their `conclusion` and `output.summary`
+
+No GitHub API token is required separately — it uses whatever `gh auth` is set up.
+
+### 3. Allure → test failure names
+
+When a check run has `conclusion: failure`, QueuePilot extracts the Allure report URL from the check run's summary text, then:
+
+1. Fetches `data/categories.json` (or falls back to `data/suites.json` → `data/behaviors.json`)
+2. Walks the tree to find all leaf nodes with status `failed` or `broken`
+3. For each failed test UID, calls `data/test-cases/{uid}.json` to get the fully-qualified Java method name (e.g. `Magento\Catalog\Test\Mftf\Test\...`)
+4. Up to 10 test-case fetches run in parallel per PR; up to 5 PRs are analyzed in parallel
+
+If Allure data isn't ready yet, it retries up to `--allure-attempts` times with 10-second pauses.
+
+### 4. Jira → ticket links
+
+If `JIRA_TOKEN` is set, QueuePilot searches `jira.corp.adobe.com` for each unique failing test:
+- JQL: `project = ACQE AND summary ~ "{test_method_name}" ORDER BY created DESC`
+- Only non-Done, non-Cancelled tickets are surfaced
+- Up to 5 Jira lookups run in parallel
+- Results are attached to each failure and shown in both the Slack summary and the HTML report
+
+### 5. Slack → report delivery
+
+The report is posted as a **thread reply to qmbot's message** using `chat.postMessage` with `thread_ts` set to qmbot's `ts`. This means:
+- One bot message in the thread, nothing at the top-level channel
+- The Slack Connect bot identity is used (whichever identity the `SLACK_TOKEN` belongs to)
+- The summary includes: PR count, unique failing test count, per-test occurrence count across all PRs/editions, Jira links, and per-PR CE/EE/B2B pass/fail badges
+
+### 6. HTML report → local file
+
+An HTML dashboard is also saved to `reports/` and `~/Downloads/` on your Mac. It contains:
+- Queue summary with CE / EE / B2B status badges per PR
+- All failing tests table sorted by frequency, with Jira ticket links
+- Per-PR breakdown with full test names, Allure links, and Jenkins links
+
+---
+
+## Cost
+
+QueuePilot makes no paid API calls. All integrations are free:
+
+| Integration | API | Cost |
+|-------------|-----|------|
+| Slack read | `conversations.history` | Free (bot token) |
+| Slack write | `chat.postMessage` | Free (bot token) |
+| GitHub | `gh` CLI + REST API | Free (authenticated user) |
+| Allure | Static JSON files from report URL | Free (internal) |
+| Jira | REST API v2 search | Free (internal PAT) |
+
+No LLM, no third-party service, no usage fees.
+
+---
+
+## Setup (once per machine)
 
 ### Prerequisites
 
@@ -38,10 +113,10 @@ The script will:
 - Install Python dependencies
 - Authenticate GitHub CLI (if not already done)
 - Ask for your `SLACK_TOKEN` and optionally `JIRA_TOKEN`
-- Install and start the background watcher automatically
+- Install and start the background watcher as a macOS LaunchAgent
 - Configure it to **start at every login** — you never need to run it again
 
-That's it. After setup, just send the Slack message and the report appears.
+After setup, just send the Slack message and the report appears in the thread.
 
 ---
 
@@ -50,7 +125,7 @@ That's it. After setup, just send the Slack message and the report appears.
 | Token | Where to get it | Required? |
 |-------|----------------|-----------|
 | `SLACK_TOKEN` | Slack app settings → OAuth tokens → Bot token (`xoxb-...`) | Yes |
-| `JIRA_TOKEN` | Jira → Profile → Personal Access Tokens | No (enables Jira ticket links in report) |
+| `JIRA_TOKEN` | Jira → Profile → Personal Access Tokens | No — enables Jira ticket links |
 
 ---
 
@@ -71,30 +146,24 @@ bash setup.sh
 
 ## Manual trigger (optional)
 
-If you want to run the report manually without the watcher:
+Run without the watcher — reads qmbot's latest message from Slack automatically:
 
 ```bash
 export SLACK_TOKEN=xoxb-your-token-here
 python3 queuepilot.py 2.4-develop
 ```
 
-Or skip Slack and pass PR numbers directly:
+Skip Slack entirely and pass PR numbers directly:
 
 ```bash
 python3 queuepilot.py 2.4-develop --prs 10737 10740 10741
 ```
 
----
+Post the report as a reply to a specific Slack message:
 
-## Report contents
-
-Each run posts a formatted Slack message to `#pr-queue-dashboard` and saves an HTML dashboard to `reports/` and `~/Downloads/`.
-
-The HTML report includes:
-1. **Stats** — PR count and unique failing test count
-2. **Queue summary** — all PRs with CE / EE / B2B / SVC status badges
-3. **All Failing Tests** — deduplicated list sorted by failure frequency, with Jira ticket links
-4. **Per-PR details** — CE | EE | B2B columns with full test names, Jira badges, Allure and Jenkins links
+```bash
+python3 queuepilot.py 2.4-develop --reply-to-ts 1718000000.123456
+```
 
 ---
 
@@ -103,12 +172,10 @@ The HTML report includes:
 ```
 python3 queuepilot.py <branch> [options]
 
-  --channel ID        Slack channel ID        (default: C0B400Y1ZU2)
-  --bot ID            Slack bot user ID       (default: W015DAXESG0)
-  --repo OWNER/REPO   GitHub repo             (default: magento-commerce/magento2ce)
-  --output FILE       HTML output path        (default: auto-timestamped)
-  --no-slack          Skip posting to Slack
-  --prs N [N ...]     Use these PR numbers instead of reading from Slack
-  --jira-token TOKEN  Jira PAT for ticket lookup
-  --allure-attempts N Allure retry count      (default: 2)
+  --output FILE         HTML output path          (default: auto-timestamped in reports/)
+  --no-slack            Skip posting to Slack
+  --prs N [N ...]       Use these PR numbers instead of reading from Slack
+  --jira-token TOKEN    Jira PAT for ticket lookup (or set JIRA_TOKEN env var)
+  --allure-attempts N   Allure retry count         (default: 2, ~10s each)
+  --reply-to-ts TS      Slack message ts to reply into (set automatically by watcher)
 ```
