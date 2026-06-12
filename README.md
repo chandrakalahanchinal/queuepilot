@@ -64,7 +64,7 @@ The report is posted as a **thread reply to qmbot's message** using `chat.postMe
 
 ### 6. HTML report → local file
 
-An HTML dashboard is also saved to `reports/` and `~/Downloads/` on your Mac. It contains:
+An HTML dashboard is saved to `reports/` on your Mac. It contains:
 - Queue summary with CE / EE / B2B status badges per PR
 - All failing tests table sorted by frequency, with Jira ticket links
 - Per-PR breakdown with full test names, Allure links, and Jenkins links
