@@ -77,8 +77,9 @@ def parse_pr_list(bot_text: str) -> list[dict]:
     return results
 
 
-def slack_upload_html(token: str, channel: str, filepath: str, filename: str) -> Optional[str]:
-    """Upload HTML report to Slack, return permalink or None."""
+def slack_upload_html(token: str, channel: str, filepath: str, filename: str,
+                      thread_ts: Optional[str] = None) -> Optional[str]:
+    """Upload HTML report to Slack as a thread reply if thread_ts given, return permalink or None."""
     try:
         # Step 1: get upload URL
         r = requests.post(
@@ -97,11 +98,14 @@ def slack_upload_html(token: str, channel: str, filepath: str, filename: str) ->
         with open(filepath, "rb") as f:
             requests.put(upload_url, data=f, timeout=60)
 
-        # Step 3: complete + share to channel
+        # Step 3: complete + share to channel (as thread reply if thread_ts provided)
+        payload: dict = {"files": [{"id": file_id}], "channel_id": channel}
+        if thread_ts:
+            payload["thread_ts"] = thread_ts
         r = requests.post(
             "https://slack.com/api/files.completeUploadExternal",
             headers={"Authorization": f"Bearer {token}"},
-            json={"files": [{"id": file_id}], "channel_id": channel},
+            json=payload,
             timeout=15,
         )
         data = r.json()
@@ -113,8 +117,8 @@ def slack_upload_html(token: str, channel: str, filepath: str, filename: str) ->
 
 
 def slack_post_dashboard(token: str, channel: str, branch: str,
-                         prs: list[dict], permalink: Optional[str]) -> None:
-    """Post a formatted QueuePilot summary to Slack."""
+                         prs: list[dict], permalink: Optional[str]) -> Optional[str]:
+    """Post a formatted QueuePilot summary to Slack. Returns message ts or None."""
     from collections import Counter
     # Count total occurrences across all PRs and all editions
     counts: Counter = Counter()
@@ -177,15 +181,18 @@ def slack_post_dashboard(token: str, channel: str, branch: str,
         blocks.append({"type": "divider"})
 
     try:
-        requests.post(
+        resp = requests.post(
             "https://slack.com/api/chat.postMessage",
             headers={"Authorization": f"Bearer {token}"},
             json={"channel": channel, "blocks": blocks, "text": f"QueuePilot — {branch}"},
             timeout=15,
-        ).raise_for_status()
+        )
+        resp.raise_for_status()
         print(f"  ✅ Summary posted to Slack channel #{channel}", flush=True)
+        return resp.json().get("ts")
     except Exception as e:
         print(f"  ⚠ Slack post failed: {e}", flush=True)
+        return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -951,15 +958,16 @@ def main():
     slack_token = os.getenv("SLACK_TOKEN", "")
     if slack_token and not args.no_slack:
         print("5. Posting dashboard to Slack...", flush=True)
+        msg_ts = slack_post_dashboard(slack_token, DEFAULT_CHANNEL, args.branch, pr_results, None)
         permalink = slack_upload_html(
             slack_token, DEFAULT_CHANNEL,
             output_path, os.path.basename(output_path),
+            thread_ts=msg_ts,
         )
         if permalink:
-            print(f"   Dashboard uploaded: {permalink}", flush=True)
+            print(f"   Dashboard uploaded as thread reply: {permalink}", flush=True)
         else:
-            print("   ⚠ File upload failed (token may lack files:write scope) — posting summary only.", flush=True)
-        slack_post_dashboard(slack_token, DEFAULT_CHANNEL, args.branch, pr_results, permalink)
+            print("   ⚠ File upload failed (token may lack files:write scope).", flush=True)
 
 
 if __name__ == "__main__":
