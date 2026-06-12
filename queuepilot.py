@@ -117,7 +117,8 @@ def slack_upload_html(token: str, channel: str, filepath: str, filename: str,
 
 
 def slack_post_dashboard(token: str, channel: str, branch: str,
-                         prs: list[dict], permalink: Optional[str]) -> Optional[str]:
+                         prs: list[dict], permalink: Optional[str],
+                         thread_ts: Optional[str] = None) -> Optional[str]:
     """Post a formatted QueuePilot summary to Slack. Returns message ts or None."""
     from collections import Counter
     # Count total occurrences across all PRs and all editions
@@ -181,10 +182,13 @@ def slack_post_dashboard(token: str, channel: str, branch: str,
         blocks.append({"type": "divider"})
 
     try:
+        payload: dict = {"channel": channel, "blocks": blocks, "text": f"QueuePilot — {branch}"}
+        if thread_ts:
+            payload["thread_ts"] = thread_ts
         resp = requests.post(
             "https://slack.com/api/chat.postMessage",
             headers={"Authorization": f"Bearer {token}"},
-            json={"channel": channel, "blocks": blocks, "text": f"QueuePilot — {branch}"},
+            json=payload,
             timeout=15,
         )
         resp.raise_for_status()
@@ -862,6 +866,8 @@ def main():
                         help="Jira personal access token for ticket lookup (or set JIRA_TOKEN env var)")
     parser.add_argument("--allure-attempts", type=int, default=2,
                         help="Max retry attempts for Allure data (default 2 = ~10s; increase if data not ready)")
+    parser.add_argument("--reply-to-ts", default=None,
+                        help="Slack message ts to reply to (posts summary + report into that thread)")
     args = parser.parse_args()
 
     print(f"\n🐛 QueuePilot — {args.branch}\n")
@@ -958,11 +964,18 @@ def main():
     slack_token = os.getenv("SLACK_TOKEN", "")
     if slack_token and not args.no_slack:
         print("5. Posting dashboard to Slack...", flush=True)
-        msg_ts = slack_post_dashboard(slack_token, DEFAULT_CHANNEL, args.branch, pr_results, None)
+        # If triggered from watcher, reply into qmbot's thread; otherwise post top-level
+        reply_ts = args.reply_to_ts or None
+        msg_ts = slack_post_dashboard(
+            slack_token, DEFAULT_CHANNEL, args.branch, pr_results, None,
+            thread_ts=reply_ts,
+        )
+        # Upload HTML as a reply to the summary message (or qmbot thread if reply_ts given)
+        upload_thread = reply_ts or msg_ts
         permalink = slack_upload_html(
             slack_token, DEFAULT_CHANNEL,
             output_path, os.path.basename(output_path),
-            thread_ts=msg_ts,
+            thread_ts=upload_thread,
         )
         if permalink:
             print(f"   Dashboard uploaded as thread reply: {permalink}", flush=True)

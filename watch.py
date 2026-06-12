@@ -17,6 +17,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import requests
 
@@ -63,6 +64,7 @@ def load_state() -> dict:
         "last_processed_ts": now_ts,   # ignore all Slack history before this moment
         "pending_trigger_ts": None,    # cleared on every restart
         "fire_after_ts": fire_after_ts,
+        "qmbot_reply_ts": None,        # ts of qmbot's PR-list message (for thread reply)
     }
 
 
@@ -87,7 +89,7 @@ def has_prs(text: str) -> bool:
     return bool(re.search(r"github\.com/magento-commerce/[\w.-]+/pull/\d+", text))
 
 
-def run_queuepilot() -> None:
+def run_queuepilot(qmbot_reply_ts: Optional[str] = None) -> None:
     log("Triggering QueuePilot...")
     env = {**os.environ, "SLACK_TOKEN": SLACK_TOKEN, "JIRA_TOKEN": JIRA_TOKEN}
     cmd = [
@@ -97,11 +99,13 @@ def run_queuepilot() -> None:
     ]
     if JIRA_TOKEN:
         cmd += ["--jira-token", JIRA_TOKEN]
+    if qmbot_reply_ts:
+        cmd += ["--reply-to-ts", qmbot_reply_ts]
     result = subprocess.run(cmd, text=True, env=env, cwd=SCRIPT_DIR)
     if result.returncode != 0:
         log(f"QueuePilot exited with code {result.returncode}")
     else:
-        log("QueuePilot finished — report posted to channel.")
+        log("QueuePilot finished — report posted to qmbot thread.")
 
 
 def main() -> None:
@@ -129,8 +133,9 @@ def main() -> None:
             fire_ts = state.get("fire_after_ts")
             if fire_ts and now >= float(fire_ts):
                 log("5-minute wait complete — running QueuePilot")
-                run_queuepilot()
-                state["fire_after_ts"] = None
+                run_queuepilot(qmbot_reply_ts=state.get("qmbot_reply_ts"))
+                state["fire_after_ts"]  = None
+                state["qmbot_reply_ts"] = None
                 save_state(state)
 
             messages = slack_history()
@@ -166,6 +171,7 @@ def main() -> None:
                             )
                             state["fire_after_ts"]      = f"{fire_at:.6f}"
                             state["pending_trigger_ts"] = None
+                            state["qmbot_reply_ts"]     = ts
                         else:
                             log("qmbot replied but no PRs found — nothing to report")
                             state["pending_trigger_ts"] = None
