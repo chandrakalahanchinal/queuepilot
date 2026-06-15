@@ -39,7 +39,7 @@ For each PR, QueuePilot uses the GitHub CLI (`gh`) to fetch:
 
 No separate GitHub token needed — uses whatever `gh auth` is configured.
 
-### 3. Allure → test failure names
+### 3. Allure → test failure names (all runs)
 
 When a check run has `conclusion: failure`, QueuePilot:
 1. Extracts the Allure report URL from the check-run summary (falls back to scraping the Jenkins page)
@@ -49,6 +49,8 @@ When a check run has `conclusion: failure`, QueuePilot:
 5. Up to **10 test-case fetches in parallel** per PR; up to **5 PRs in parallel**
 
 Retries up to `--allure-attempts` times (10-second pauses). Falls back to Prometheus stats if retries are exhausted.
+
+**Previous runs via PR comments:** PRs are often re-triggered multiple times. Each run posts a bot comment containing Allure links. QueuePilot also scrapes all PR comments for Allure report URLs and fetches failures from every previous run, then unions them with the current run — deduplicated by test method name. This ensures no failure is missed across re-runs.
 
 ### 4. Jira → ticket links
 
