@@ -240,6 +240,33 @@ def extract_allure_url(summary: str, edition: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def get_pr_comment_allure_urls(repo: str, pr_number: int) -> dict[str, list[str]]:
+    """Return all unique Allure index URLs from PR comments, grouped by edition."""
+    try:
+        result = subprocess.run(
+            ["gh", "api", f"repos/{repo}/issues/{pr_number}/comments",
+             "--paginate", "--jq", ".[].body"],
+            capture_output=True, text=True, check=True,
+        )
+        bodies = result.stdout.strip().splitlines()
+    except subprocess.CalledProcessError:
+        return {}
+
+    url_re = re.compile(
+        r'https://\S+allure-report-(ce|ee|b2b)/index\.html', re.IGNORECASE
+    )
+    seen: set = set()
+    urls: dict[str, list[str]] = {"ce": [], "ee": [], "b2b": []}
+    for body in bodies:
+        for m in url_re.finditer(body):
+            url = m.group(0).split("#")[0]  # strip fragment anchor
+            edition = m.group(1).lower()
+            if url not in seen:
+                seen.add(url)
+                urls[edition].append(url)
+    return {ed: lst for ed, lst in urls.items() if lst}
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Allure
 # ──────────────────────────────────────────────────────────────────────────────
@@ -430,7 +457,8 @@ def fetch_jira_tickets(pr_results: list[dict], token: str) -> None:
 ALLURE_RETRY_SLEEP = 10  # seconds between Allure retry attempts
 
 
-def _analyze_edition(edition: str, cr: dict, pr_number: int, allure_attempts: int) -> tuple[str, dict]:
+def _analyze_edition(edition: str, cr: dict, pr_number: int, allure_attempts: int,
+                     comment_urls: Optional[list] = None) -> tuple[str, dict]:
     """Analyze one edition's check run. Runs in a thread — returns (edition, data)."""
     conclusion  = cr.get("conclusion")
     cr_status   = cr.get("status", "")
@@ -470,6 +498,22 @@ def _analyze_edition(edition: str, cr: dict, pr_number: int, allure_attempts: in
         if not failures:
             prom_stats = get_prometheus_stats(base)
 
+    # Merge failures from all previous-run Allure reports found in PR comments
+    if comment_urls:
+        current_base = allure_base(report_url) if report_url else None
+        by_method = {f["method"]: f for f in failures}
+        for url in comment_urls:
+            base = allure_base(url)
+            if base == current_base:
+                continue  # already processed this run
+            print(f"  [PR #{pr_number}] Checking previous {edition.upper()} run: {base.split('/')[-3]}...", flush=True)
+            uids = get_failed_uids(base)
+            if uids:
+                for f in resolve_failures(base, uids):
+                    if f["method"] not in by_method:
+                        by_method[f["method"]] = f
+        failures = list(by_method.values())
+
     return edition, {
         "status":      "failure",
         "failures":    failures,
@@ -485,6 +529,12 @@ def analyze_pr(repo: str, pr_number: int, allure_attempts: int = 2) -> dict:
     sha        = pr_info["headRefOid"]
     check_runs = get_check_runs(repo, sha)
     check_map  = {cr["name"]: cr for cr in check_runs}
+
+    # Collect all Allure URLs from PR comments (previous runs)
+    comment_allure = get_pr_comment_allure_urls(repo, pr_number)
+    if comment_allure:
+        total = sum(len(v) for v in comment_allure.values())
+        print(f"  [PR #{pr_number}] Found {total} previous-run Allure report(s) in comments", flush=True)
 
     result = {
         "pr_number": pr_number,
@@ -504,7 +554,10 @@ def analyze_pr(repo: str, pr_number: int, allure_attempts: int = 2) -> dict:
             if not cr:
                 result["editions"][edition] = {"status": "not_run", "failures": [], "report_url": None}
             else:
-                futures[ex.submit(_analyze_edition, edition, cr, pr_number, allure_attempts)] = edition
+                futures[ex.submit(
+                    _analyze_edition, edition, cr, pr_number, allure_attempts,
+                    comment_allure.get(edition, [])
+                )] = edition
         for fut in as_completed(futures):
             edition, ed_data = fut.result()
             result["editions"][edition] = ed_data
