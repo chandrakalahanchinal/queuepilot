@@ -1,6 +1,37 @@
 # QueuePilot
 
-Automatic triage of Magento functional test failures (CE / EE / B2B) for PRs in the `2.4-develop` queue. Send one Slack message — the full failure report appears as a reply in the same thread, automatically.
+**Repository:** https://github.com/chandrakalahanchinal/queuepilot
+
+---
+
+## Problem Statement
+
+The Magento `2.4-develop` PR queue typically contains 3–8 PRs waiting to merge at any given time. Each PR runs functional tests across three editions — CE, EE, and B2B — producing separate Allure reports and Jenkins builds. PRs are often re-triggered multiple times as fixes land.
+
+Manually triaging this means:
+- Opening 3–8 PRs individually on GitHub
+- Clicking into each CE / EE / B2B check run
+- Opening each Allure report and scrolling through failures
+- Cross-referencing Jira to find whether a failure is a known flake or a real regression
+- Repeating this for every previous re-run whose results are buried in PR comments
+- Doing all of this every time the queue changes — often multiple times a day
+
+This takes **20–40 minutes per triage cycle**, is error-prone, and produces inconsistent results across team members.
+
+---
+
+## Solution
+
+QueuePilot automates the entire triage workflow end-to-end. One Slack message triggers everything:
+
+1. Detects `@qmbot dq 2.4-develop` in `#pr-queue-dashboard`
+2. Waits for qmbot to reply with the PR list, then waits 5 minutes for test data to settle
+3. Fetches GitHub check runs for every PR in the queue
+4. Scrapes Allure failure data from the current run **and** all previous runs found in PR comments — no failure is missed across re-runs
+5. Looks up each unique failing test in Jira (ACQE project) to surface active tickets
+6. Posts a structured summary as a **thread reply to qmbot's message** — PR count, unique failing tests with occurrence counts and Jira links, per-PR CE/EE/B2B breakdown
+
+The full triage that took 20–40 minutes now takes under 10 minutes of automated work and appears directly in the Slack thread where the team is already looking.
 
 ---
 
