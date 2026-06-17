@@ -81,7 +81,9 @@ When a check run has `conclusion: failure`, QueuePilot:
 
 Retries up to `--allure-attempts` times (10-second pauses). Falls back to Prometheus stats if retries are exhausted.
 
-**Previous runs via PR comments:** PRs are often re-triggered multiple times. Each run posts a bot comment containing Allure links. QueuePilot also scrapes all PR comments for Allure report URLs and fetches failures from every previous run, then unions them with the current run — deduplicated by test method name. This ensures no failure is missed across re-runs.
+**Previous runs via PR body and comments:** PRs are often re-triggered multiple times. Each run posts a bot comment containing Allure links; the PR description may also contain Allure URLs from earlier runs. QueuePilot scrapes both the PR body and all PR comments for Allure report URLs (`get_pr_allure_urls`), fetches failures from every previous run, then unions them with the current run — deduplicated by test method name. This ensures no failure is missed across re-runs.
+
+**Checks still running:** When a PR's latest check is `in_progress` or `queued`, QueuePilot still fetches failures from all available previous-run Allure URLs and returns them, marking the edition with an `⏳ RUNNING · N prev fail` badge so you can act on known failures while the latest run finishes.
 
 ### 4. Jira → ticket links
 
@@ -153,7 +155,8 @@ Badge meanings:
 |-------|---------|
 | `N FAIL` | N tests failed in this edition |
 | `✅ PASS` | All checks passed |
-| `⏳ RUNNING` | Check still in progress |
+| `⏳ RUNNING` | Check still in progress, no previous failures available |
+| `⏳ RUNNING · N prev fail` | Check running; N failures found from previous runs |
 | `N/A` | Check has not run for this edition |
 
 ---

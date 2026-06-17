@@ -158,8 +158,10 @@ def slack_post_dashboard(token: str, channel: str, branch: str,
             if s == "failure":
                 n = len(ed.get("failures", []))
                 return f"*{n} FAIL*" if n else "—"
-            return {"success": "✅ PASS", "in_progress": "⏳ RUNNING",
-                    "not_run": "N/A"}.get(s, s.upper())
+            if s == "in_progress":
+                n = len(ed.get("failures", []))
+                return f"⏳ RUNNING _{n} prev fail_" if n else "⏳ RUNNING"
+            return {"success": "✅ PASS", "not_run": "N/A"}.get(s, s.upper())
 
         pr_text = (
             f"*<{pr['url']}|#{pr['pr_number']}>* {pr['title'][:55]}\n"
@@ -213,7 +215,7 @@ def gh_json(args: list[str]) -> dict | list:
 def get_pr_info(repo: str, pr_number: int) -> dict:
     return gh_json([
         "pr", "view", str(pr_number), "--repo", repo,
-        "--json", "title,author,headRefOid,headRefName,url",
+        "--json", "title,author,headRefOid,headRefName,url,body",
     ])
 
 
@@ -240,30 +242,36 @@ def extract_allure_url(summary: str, edition: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def get_pr_comment_allure_urls(repo: str, pr_number: int) -> dict[str, list[str]]:
-    """Return all unique Allure index URLs from PR comments, grouped by edition."""
+def get_pr_allure_urls(repo: str, pr_number: int, pr_body: str = "") -> dict[str, list[str]]:
+    """Return all unique Allure index URLs from PR body + comments, grouped by edition."""
+    url_re = re.compile(
+        r'https://\S+allure-report-(ce|ee|b2b)/index\.html', re.IGNORECASE
+    )
+    seen: set = set()
+    urls: dict[str, list[str]] = {"ce": [], "ee": [], "b2b": []}
+
+    def _scan(text: str) -> None:
+        for m in url_re.finditer(text):
+            url = m.group(0).split("#")[0]  # strip fragment anchor
+            edition = m.group(1).lower()
+            if url not in seen:
+                seen.add(url)
+                urls[edition].append(url)
+
+    if pr_body:
+        _scan(pr_body)
+
     try:
         result = subprocess.run(
             ["gh", "api", f"repos/{repo}/issues/{pr_number}/comments",
              "--paginate", "--jq", ".[].body"],
             capture_output=True, text=True, check=True,
         )
-        bodies = result.stdout.strip().splitlines()
+        for body in result.stdout.strip().splitlines():
+            _scan(body)
     except subprocess.CalledProcessError:
-        return {}
+        pass
 
-    url_re = re.compile(
-        r'https://\S+allure-report-(ce|ee|b2b)/index\.html', re.IGNORECASE
-    )
-    seen: set = set()
-    urls: dict[str, list[str]] = {"ce": [], "ee": [], "b2b": []}
-    for body in bodies:
-        for m in url_re.finditer(body):
-            url = m.group(0).split("#")[0]  # strip fragment anchor
-            edition = m.group(1).lower()
-            if url not in seen:
-                seen.add(url)
-                urls[edition].append(url)
     return {ed: lst for ed, lst in urls.items() if lst}
 
 
@@ -467,7 +475,26 @@ def _analyze_edition(edition: str, cr: dict, pr_number: int, allure_attempts: in
     jenkins_url = cr.get("details_url", "")
 
     if cr_status in ("in_progress", "queued") and conclusion is None:
-        return edition, {"status": "in_progress", "failures": [], "report_url": report_url, "jenkins_url": jenkins_url}
+        # Fetch failures from any previous runs found in PR body/comments
+        prev_failures: list = []
+        if comment_urls:
+            by_method: dict = {}
+            for url in comment_urls:
+                base = allure_base(url)
+                print(f"  [PR #{pr_number}] {edition.upper()} running — checking previous run: {url.split('/')[-4]}...", flush=True)
+                uids = get_failed_uids(base)
+                if uids:
+                    for f in resolve_failures(base, uids):
+                        if f["method"] not in by_method:
+                            by_method[f["method"]] = f
+            prev_failures = list(by_method.values())
+        return edition, {
+            "status":         "in_progress",
+            "failures":       prev_failures,
+            "report_url":     report_url,
+            "jenkins_url":    jenkins_url,
+            "latest_running": True,
+        }
 
     if conclusion is None:
         conclusion = "unknown"
@@ -530,8 +557,9 @@ def analyze_pr(repo: str, pr_number: int, allure_attempts: int = 2) -> dict:
     check_runs = get_check_runs(repo, sha)
     check_map  = {cr["name"]: cr for cr in check_runs}
 
-    # Collect all Allure URLs from PR comments (previous runs)
-    comment_allure = get_pr_comment_allure_urls(repo, pr_number)
+    # Collect all Allure URLs from PR body + comments (previous runs)
+    pr_body = pr_info.get("body", "") or ""
+    comment_allure = get_pr_allure_urls(repo, pr_number, pr_body)
     if comment_allure:
         total = sum(len(v) for v in comment_allure.values())
         print(f"  [PR #{pr_number}] Found {total} previous-run Allure report(s) in comments", flush=True)
@@ -593,10 +621,15 @@ def badge(status: str) -> str:
 
 
 def failure_count_badge(edition_data: dict) -> str:
-    if edition_data["status"] != "failure":
-        return badge(edition_data["status"])
-    n = len(edition_data["failures"])
-    return f'<span class="badge fail">{n} FAIL</span>'
+    status = edition_data["status"]
+    if status == "failure":
+        n = len(edition_data["failures"])
+        return f'<span class="badge fail">{n} FAIL</span>'
+    if status == "in_progress":
+        n = len(edition_data.get("failures", []))
+        extra = f" · {n} prev fail" if n else ""
+        return f'<span class="badge running">RUNNING{extra}</span>'
+    return badge(status)
 
 
 
@@ -645,7 +678,11 @@ def render_pr_card(pr: dict) -> str:
             jenkins_link = ""
             if ed.get("jenkins_url"):
                 jenkins_link = f' <a href="{html.escape(ed["jenkins_url"])}" target="_blank">Jenkins ↗</a>'
-            no_data = f'<p class="muted">⏳ Checks are currently running.{jenkins_link}</p>'
+            running_note = f'<p class="muted">⏳ Latest checks are running.{jenkins_link}</p>'
+            if ed.get("failures"):
+                no_data = running_note + '<p class="muted warn">⚠ Failures below are from previous runs:</p>'
+            else:
+                no_data = running_note
         elif ed["status"] == "failure" and not ed["failures"]:
             links = ""
             if ed.get("report_url"):
@@ -673,10 +710,14 @@ def render_pr_card(pr: dict) -> str:
                 no_data = f'<p class="muted warn">⚠ Build failed before tests ran — no report data.{links}</p>'
         else:
             no_data = '<p class="muted">✓ No failures.</p>'
+        if ed["status"] == "in_progress" and table:
+            edition_content = no_data + table
+        else:
+            edition_content = table if table else no_data
         edition_sections += f"""
       <div class="edition-block">
         <h4>Functional Tests {label} {fail_badge}</h4>
-        {table if table else no_data}
+        {edition_content}
       </div>"""
 
     svc_block = render_svc_block(pr.get("svc"))
